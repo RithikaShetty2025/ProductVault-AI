@@ -19,41 +19,89 @@ import {
   Clock
 } from 'lucide-react';
 import { AppRoute } from '../types';
+import { supabase } from '../lib/supabaseClient';
+
+export interface AuthenticatedUser {
+  id: string;
+  email: string;
+  fullName: string;
+}
 
 interface LoginViewProps {
   initialMode?: 'signin' | 'signup';
-  onLoginSuccess: (email: string, name: string) => void;
+  onLoginSuccess: (user: AuthenticatedUser) => void;
   onNavigate: (route: AppRoute) => void;
+  /**
+   * Local-only demo mode entry point. This intentionally does NOT create a
+   * Supabase session — it is a separate, clearly-labeled sandbox mode so it
+   * can never be confused with a real authenticated user.
+   */
+  onDemoLogin: () => void;
 }
 
-export const LoginView: React.FC<LoginViewProps> = ({ 
+// Translate raw Supabase/Auth error messages into friendly, specific copy.
+const friendlyAuthError = (rawMessage: string, mode: 'signin' | 'signup'): string => {
+  const msg = rawMessage.toLowerCase();
+
+  if (msg.includes('invalid login credentials')) {
+    return 'Incorrect email or password. Please try again.';
+  }
+  if (msg.includes('already registered') || msg.includes('already exists') || msg.includes('user already registered')) {
+    return 'An account with this email already exists. Try signing in instead.';
+  }
+  if (msg.includes('password should be at least') || msg.includes('password is too short') || msg.includes('weak password')) {
+    return 'Password is too weak. Please use at least 6 characters.';
+  }
+  if (msg.includes('unable to validate email address') || msg.includes('invalid email')) {
+    return 'Please enter a valid email address.';
+  }
+  if (msg.includes('email not confirmed')) {
+    return 'Please confirm your email address before signing in. Check your inbox for a verification link.';
+  }
+  if (msg.includes('rate limit') || msg.includes('too many requests')) {
+    return 'Too many attempts. Please wait a moment and try again.';
+  }
+  if (msg.includes('failed to fetch') || msg.includes('network')) {
+    return 'Network error reaching authentication service. Please check your connection and try again.';
+  }
+
+  return mode === 'signup'
+    ? `Sign up failed: ${rawMessage}`
+    : `Sign in failed: ${rawMessage}`;
+};
+
+export const LoginView: React.FC<LoginViewProps> = ({
   initialMode = 'signin',
   onLoginSuccess,
-  onNavigate 
+  onNavigate,
+  onDemoLogin
 }) => {
   const [isSignUp, setIsSignUp] = useState(initialMode === 'signup');
-  const [email, setEmail] = useState('sushma@productvault.ai');
-  const [password, setPassword] = useState('Password123!');
-  const [confirmPassword, setConfirmPassword] = useState('Password123!');
-  const [fullName, setFullName] = useState('Sushma Gouda');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [fullName, setFullName] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [termsAgreed, setTermsAgreed] = useState(true);
-  
+
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [infoMessage, setInfoMessage] = useState('');
   const [forgotSent, setForgotSent] = useState(false);
 
   // Sync mode if prop changes
   React.useEffect(() => {
     setIsSignUp(initialMode === 'signup');
     setErrorMessage('');
+    setInfoMessage('');
   }, [initialMode]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
+    setInfoMessage('');
 
     // Field validation
     if (!email.trim() || !password.trim()) {
@@ -87,29 +135,92 @@ export const LoginView: React.FC<LoginViewProps> = ({
       }
     }
 
-    // Mock loading transition into authenticated vault
     setLoading(true);
-    setTimeout(() => {
+    try {
+      if (isSignUp) {
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          options: {
+            data: {
+              full_name: fullName.trim()
+            }
+          }
+        });
+
+        if (error) {
+          setErrorMessage(friendlyAuthError(error.message, 'signup'));
+          return;
+        }
+
+        if (!data.session || !data.user) {
+          // Email confirmation is required before a session can be created.
+          setInfoMessage(
+            `Account created. Please check ${email} to confirm your address before signing in.`
+          );
+          return;
+        }
+
+        onLoginSuccess({
+          id: data.user.id,
+          email: data.user.email ?? email.trim(),
+          fullName: (data.user.user_metadata?.full_name as string) || fullName.trim()
+        });
+      } else {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password
+        });
+
+        if (error) {
+          setErrorMessage(friendlyAuthError(error.message, 'signin'));
+          return;
+        }
+
+        if (!data.session || !data.user) {
+          setErrorMessage('Sign in failed. Please try again.');
+          return;
+        }
+
+        onLoginSuccess({
+          id: data.user.id,
+          email: data.user.email ?? email.trim(),
+          fullName: (data.user.user_metadata?.full_name as string) || ''
+        });
+      }
+    } catch (err) {
+      setErrorMessage(friendlyAuthError(err instanceof Error ? err.message : 'Unknown error', isSignUp ? 'signup' : 'signin'));
+    } finally {
       setLoading(false);
-      onLoginSuccess(email, isSignUp ? (fullName || 'Sushma Gouda') : (fullName || 'Sushma Gouda'));
-    }, 600);
+    }
   };
 
+  // Clearly-separate local sandbox mode — does NOT touch Supabase auth.
   const handleDemoSignIn = () => {
-    setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
-      onLoginSuccess('sushma@productvault.ai', 'Sushma Gouda');
-    }, 400);
+    onDemoLogin();
   };
 
-  const handleForgotPassword = () => {
+  const handleForgotPassword = async () => {
+    setErrorMessage('');
     if (!email.trim() || !email.includes('@')) {
       setErrorMessage('Please enter a valid email address above to receive reset instructions.');
       return;
     }
-    setForgotSent(true);
-    setTimeout(() => setForgotSent(false), 4500);
+
+    setLoading(true);
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email.trim());
+      if (error) {
+        setErrorMessage(friendlyAuthError(error.message, 'signin'));
+        return;
+      }
+      setForgotSent(true);
+      setTimeout(() => setForgotSent(false), 4500);
+    } catch (err) {
+      setErrorMessage(friendlyAuthError(err instanceof Error ? err.message : 'Unknown error', 'signin'));
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -132,10 +243,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
         <button
           onClick={handleDemoSignIn}
+          title="Local sandbox mode — not a real Supabase account"
           className="inline-flex items-center gap-1.5 text-xs font-bold text-teal-800 bg-teal-50/90 border border-teal-300/80 px-3.5 py-1.5 rounded-xl hover:bg-teal-100 transition-colors shadow-2xs"
         >
           <Zap className="w-3.5 h-3.5 text-teal-600" />
-          <span>Instant Demo Login</span>
+          <span>Instant Demo Login (Local Sandbox)</span>
         </button>
       </div>
 
@@ -401,6 +513,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 </div>
               )}
 
+              {/* Info Message (e.g. email confirmation required) */}
+              {infoMessage && (
+                <div className="p-2.5 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-800 flex items-center gap-2 animate-in fade-in">
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-indigo-600" />
+                  <span>{infoMessage}</span>
+                </div>
+              )}
+
               {/* Forgot Email Confirmation */}
               {forgotSent && (
                 <div className="p-2.5 rounded-xl bg-teal-50 border border-teal-200 text-xs text-teal-800 flex items-center gap-2 animate-in fade-in">
@@ -460,9 +580,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
             <div className="mt-4 pt-3 border-t border-slate-100 text-center">
               <button
                 onClick={handleDemoSignIn}
+                title="Local sandbox mode — not a real Supabase account"
                 className="text-xs font-bold text-teal-700 hover:text-teal-800 hover:underline flex items-center justify-center gap-1 mx-auto"
               >
-                <span>Instant Test Drive with Pre-Seeded Catalog</span>
+                <span>Instant Test Drive with Pre-Seeded Catalog (Local Sandbox)</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>

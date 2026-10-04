@@ -23,7 +23,7 @@ interface SettingsViewProps {
   userName: string;
   userEmail: string;
   products?: Product[];
-  onUpdateUser: (name: string, email: string) => void;
+  onUpdateUser: (name: string, email: string) => Promise<{ error?: string }> | void;
   onResetDemoData?: () => void;
   onTriggerToast?: (type: 'success' | 'error' | 'info', title: string, message?: string) => void;
 }
@@ -39,6 +39,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [name, setName] = useState(userName);
   const [email, setEmail] = useState(userEmail);
   const [savedProfile, setSavedProfile] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profileError, setProfileError] = useState('');
+
+  // Keep the form in sync if the authenticated user's profile changes
+  // externally (e.g. after a fresh fetch from Supabase).
+  React.useEffect(() => {
+    setName(userName);
+    setEmail(userEmail);
+  }, [userName, userEmail]);
 
   // Notification Preferences
   const [notifyWarranty30, setNotifyWarranty30] = useState(true);
@@ -52,14 +61,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [dateFormat, setDateFormat] = useState<'YYYY-MM-DD' | 'MM/DD/YYYY' | 'DD/MM/YYYY'>('YYYY-MM-DD');
   const [confidenceThreshold, setConfidenceThreshold] = useState<'strict' | 'balanced' | 'permissive'>('balanced');
 
-  const handleProfileSubmit = (e: React.FormEvent) => {
+  const handleProfileSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    onUpdateUser(name, email);
-    setSavedProfile(true);
-    if (onTriggerToast) {
-      onTriggerToast('success', 'Profile Updated', 'Your identity preferences have been saved.');
+    setProfileError('');
+    setSavingProfile(true);
+    try {
+      const result = await onUpdateUser(name, email);
+      if (result && result.error) {
+        setProfileError(result.error);
+        if (onTriggerToast) {
+          onTriggerToast('error', 'Profile Update Failed', result.error);
+        }
+        return;
+      }
+      setSavedProfile(true);
+      if (onTriggerToast) {
+        onTriggerToast('success', 'Profile Updated', 'Your identity preferences have been saved.');
+      }
+      setTimeout(() => setSavedProfile(false), 3000);
+    } finally {
+      setSavingProfile(false);
     }
-    setTimeout(() => setSavedProfile(false), 3000);
   };
 
   const handleExportVault = () => {
@@ -166,13 +188,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </div>
               </div>
 
+              {profileError && (
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+                  <span>{profileError}</span>
+                </div>
+              )}
+
               <div className="pt-2 flex items-center justify-between">
                 <button
                   type="submit"
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs shadow-2xs transition-colors"
+                  disabled={savingProfile}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-semibold text-xs shadow-2xs transition-colors"
                 >
                   <Save className="w-4 h-4" />
-                  <span>Save Profile</span>
+                  <span>{savingProfile ? 'Saving...' : 'Save Profile'}</span>
                 </button>
                 {savedProfile && (
                   <span className="text-xs font-semibold text-teal-700 flex items-center gap-1 animate-in fade-in">

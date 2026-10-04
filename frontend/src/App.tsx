@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import type { Session } from '@supabase/supabase-js';
 import { AppRoute, Product, AttentionItem, ActivityItem } from './types';
 import { INITIAL_PRODUCTS, ATTENTION_ITEMS, ACTIVITY_FEED } from './data/mockData';
 import { Sidebar } from './components/Sidebar';
@@ -8,7 +9,7 @@ import { DashboardView } from './views/DashboardView';
 import { ProductsView } from './views/ProductsView';
 import { ProductDetailView } from './views/ProductDetailView';
 import { LandingPageView } from './views/LandingPageView';
-import { LoginView } from './views/LoginView';
+import { LoginView, AuthenticatedUser } from './views/LoginView';
 import { AddProductWizard } from './views/AddProductWizard';
 import { GlobalDocumentsVaultView } from './views/GlobalDocumentsVaultView';
 import { ActionsAttentionView } from './views/ActionsAttentionView';
@@ -18,12 +19,74 @@ import { ServiceCentersView } from './views/ServiceCentersView';
 import { PostWarrantyView } from './views/PostWarrantyView';
 import { SettingsView } from './views/SettingsView';
 import { ProductDocument } from './types';
+import { supabase, Profile } from './lib/supabaseClient';
+
+// Local-only sandbox identity. This is NEVER written to Supabase and is
+// kept clearly distinct from a real authenticated session.
+const DEMO_USER_NAME = 'Demo User (Local Sandbox)';
+const DEMO_USER_EMAIL = 'demo-sandbox@productvault.local';
 
 export default function App() {
-  // Authentication local session state
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
-  const [userName, setUserName] = useState<string>('Sushma Gouda');
-  const [userEmail, setUserEmail] = useState<string>('sushma.gouda@gmail.com');
+  // Real Supabase authentication state (survives refresh via Supabase's
+  // own persisted session storage).
+  const [session, setSession] = useState<Session | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [profile, setProfile] = useState<Profile | null>(null);
+
+  // Clearly-separate local sandbox/demo mode. Never implies a real
+  // Supabase session exists.
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
+  // Sandbox-only profile edits. Never persisted to Supabase, lost on refresh.
+  const [demoName, setDemoName] = useState<string>(DEMO_USER_NAME);
+  const [demoEmail, setDemoEmail] = useState<string>(DEMO_USER_EMAIL);
+
+  const isAuthenticated = !!session || isDemoMode;
+  const userName = isDemoMode
+    ? demoName
+    : profile?.full_name || (session?.user.user_metadata?.full_name as string) || session?.user.email || '';
+  const userEmail = isDemoMode ? demoEmail : (session?.user.email || '');
+
+  // Fetch the profile row belonging to the signed-in user only.
+  const fetchProfile = async (userId: string) => {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', userId)
+      .single();
+
+    if (!error && data) {
+      setProfile(data as Profile);
+    } else {
+      setProfile(null);
+    }
+  };
+
+  // On mount: check for an existing Supabase session, then subscribe to
+  // auth state changes (sign in, sign out, token refresh) for the
+  // lifetime of the app.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+      if (data.session) {
+        fetchProfile(data.session.user.id);
+      }
+    });
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+      if (newSession) {
+        setIsDemoMode(false); // a real session always takes precedence over sandbox mode
+        fetchProfile(newSession.user.id);
+      } else {
+        setProfile(null);
+      }
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
 
   // Routing state
   const [currentRoute, setCurrentRoute] = useState<AppRoute>('/dashboard');
@@ -168,34 +231,97 @@ export default function App() {
   };
 
   // Authentication Handlers
-  const handleLoginSuccess = (email: string, name: string) => {
-    setUserEmail(email);
-    setUserName(name || 'Sushma');
-    setIsAuthenticated(true);
+  // Called after a REAL Supabase signUp/signInWithPassword succeeds.
+  // The session itself is already set by the onAuthStateChange listener;
+  // this just handles navigation/UX feedback.
+  const handleLoginSuccess = (user: AuthenticatedUser) => {
+    setIsDemoMode(false);
     setCurrentRoute('/dashboard');
-    addToast('success', 'Signed In', `Welcome back, ${name || 'Sushma'}!`);
+    addToast('success', 'Signed In', `Welcome back, ${user.fullName || user.email}!`);
   };
 
-  const handleLogout = () => {
-    setIsAuthenticated(false);
+  const handleLogout = async () => {
+    if (isDemoMode) {
+      // Local sandbox exit — no Supabase session was ever created.
+      setIsDemoMode(false);
+      setCurrentRoute('/landing');
+      addToast('info', 'Logged Out', 'Exited local sandbox mode.');
+      return;
+    }
+
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      addToast('error', 'Logout Failed', error.message);
+      return;
+    }
     setCurrentRoute('/landing');
     addToast('info', 'Logged Out', 'Returned to ProductVault public site.');
   };
 
-  const handleExploreDemo = () => {
-    setIsAuthenticated(true);
+  // Enters the clearly-separate local sandbox mode (no Supabase account
+  // is created or used). Shared by "Explore Demo" and "Instant Demo Login".
+  const handleEnterDemoMode = () => {
+    setIsDemoMode(true);
     setCurrentRoute('/dashboard');
-    addToast('info', 'Demo Mode Activated', 'Exploring pre-seeded ProductVault AI workspace.');
+    addToast('info', 'Demo Mode Activated', 'Exploring pre-seeded ProductVault AI workspace (local sandbox, not a real account).');
   };
+
+  // Persists profile edits from SettingsView. In local sandbox mode this is
+  // kept entirely in-memory; for a real session it updates `public.profiles`
+  // (full name) and, if the email changed, triggers a Supabase Auth email
+  // change (which requires confirmation via the link Supabase emails out).
+  const handleUpdateUser = async (name: string, email: string): Promise<{ error?: string }> => {
+    if (isDemoMode) {
+      setDemoName(name);
+      setDemoEmail(email);
+      return {};
+    }
+
+    if (!session) {
+      return { error: 'No active session.' };
+    }
+
+    const { error: profileError } = await supabase
+      .from('profiles')
+      .update({ full_name: name })
+      .eq('id', session.user.id);
+
+    if (profileError) {
+      return { error: profileError.message };
+    }
+
+    if (email.trim() !== session.user.email) {
+      const { error: emailError } = await supabase.auth.updateUser({ email: email.trim() });
+      if (emailError) {
+        return { error: emailError.message };
+      }
+    }
+
+    await fetchProfile(session.user.id);
+    return {};
+  };
+
+  // While the initial Supabase session check is in flight, avoid flashing
+  // the landing/login page for users who are actually already signed in.
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#F4F6F8]">
+        <div className="flex items-center gap-2 text-slate-500 text-sm font-medium">
+          <span className="w-4 h-4 border-2 border-slate-300 border-t-indigo-600 rounded-full animate-spin" />
+          <span>Checking session...</span>
+        </div>
+      </div>
+    );
+  }
 
   // Public Landing Page view (accessible when unauthenticated, or on explicit /landing route)
   if (currentRoute === '/landing' || (!isAuthenticated && currentRoute !== '/login' && currentRoute !== '/signup')) {
     return (
       <div className="font-sans antialiased bg-[#0E1626] min-h-screen">
-        <LandingPageView 
-          onNavigate={handleNavigate} 
-          onExploreDemo={handleExploreDemo} 
-          isAuthenticated={isAuthenticated} 
+        <LandingPageView
+          onNavigate={handleNavigate}
+          onExploreDemo={handleEnterDemoMode}
+          isAuthenticated={isAuthenticated}
         />
         <ToastContainer toasts={toasts} onDismiss={removeToast} />
       </div>
@@ -206,10 +332,11 @@ export default function App() {
   if (!isAuthenticated || currentRoute === '/login' || currentRoute === '/signup') {
     return (
       <div className="font-sans antialiased bg-[#0B1322] min-h-screen">
-        <LoginView 
-          initialMode={currentRoute === '/signup' ? 'signup' : 'signin'} 
+        <LoginView
+          initialMode={currentRoute === '/signup' ? 'signup' : 'signin'}
           onLoginSuccess={handleLoginSuccess}
           onNavigate={handleNavigate}
+          onDemoLogin={handleEnterDemoMode}
         />
         <ToastContainer toasts={toasts} onDismiss={removeToast} />
       </div>
@@ -361,11 +488,7 @@ export default function App() {
             userName={userName}
             userEmail={userEmail}
             products={products}
-            onUpdateUser={(name, email) => {
-              setUserName(name);
-              setUserEmail(email);
-              addToast('success', 'Profile Updated', 'Vault preferences saved.');
-            }}
+            onUpdateUser={handleUpdateUser}
             onResetDemoData={handleResetDemoData}
             onTriggerToast={addToast}
           />
