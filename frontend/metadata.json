@@ -1,0 +1,6 @@
+{
+  "name": "ProductVault AI",
+  "description": "AI-powered Product Lifecycle and Intelligent Product Information Management Platform for durable and beauty products.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
