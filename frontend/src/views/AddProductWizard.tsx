@@ -32,6 +32,19 @@ interface AddProductWizardProps {
 type WizardStep = 'select_type' | 'input_method' | 'upload_or_scan' | 'processing' | 'verify_extraction';
 type InputMethod = 'scan' | 'pdf' | 'manual';
 
+const WIZARD_STEPS: WizardStep[] = [
+  'select_type',
+  'input_method',
+  'upload_or_scan',
+  'processing',
+  'verify_extraction'
+];
+
+const getWizardStepFromLocation = (): WizardStep => {
+  const step = new URLSearchParams(window.location.search).get('step');
+  return WIZARD_STEPS.includes(step as WizardStep) ? (step as WizardStep) : 'select_type';
+};
+
 interface UploadedFileItem {
   id: string;
   name: string;
@@ -42,9 +55,60 @@ interface UploadedFileItem {
 }
 
 export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct, onBack }) => {
-  const [step, setStep] = useState<WizardStep>('select_type');
+  const [step, setStep] = useState<WizardStep>(getWizardStepFromLocation);
   const [productType, setProductType] = useState<ProductType>('durable');
   const [inputMethod, setInputMethod] = useState<InputMethod>('pdf');
+
+  const navigateToStep = (nextStep: WizardStep, mode: 'push' | 'replace' = 'push') => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('step', nextStep);
+    const currentSteps = Array.isArray(window.history.state?.wizardSteps)
+      ? window.history.state.wizardSteps as WizardStep[]
+      : [step];
+    const wizardSteps = mode === 'push' && currentSteps[currentSteps.length - 1] !== nextStep
+      ? [...currentSteps, nextStep]
+      : currentSteps;
+    const historyState = { ...window.history.state, wizardStep: nextStep, wizardSteps };
+
+    if (mode === 'push') {
+      window.history.pushState(historyState, '', url);
+    } else {
+      window.history.replaceState(historyState, '', url);
+    }
+
+    setStep(nextStep);
+  };
+
+  const navigateToPreviousStep = (fallbackStep: WizardStep) => {
+    const wizardSteps = window.history.state?.wizardSteps;
+
+    if (Array.isArray(wizardSteps) && wizardSteps.length > 1) {
+      window.history.back();
+      return;
+    }
+
+    navigateToStep(fallbackStep, 'replace');
+  };
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('step', step);
+    const wizardSteps = Array.isArray(window.history.state?.wizardSteps)
+      ? window.history.state.wizardSteps as WizardStep[]
+      : [step];
+    window.history.replaceState(
+      { ...window.history.state, wizardStep: step, wizardSteps },
+      '',
+      url
+    );
+
+    const handlePopState = () => {
+      setStep(getWizardStepFromLocation());
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // Uploaded files
   const [files, setFiles] = useState<UploadedFileItem[]>([
@@ -95,22 +159,28 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
   useEffect(() => {
     if (step === 'processing') {
       setProcessingStageIndex(0);
+      let completionTimeout: ReturnType<typeof setTimeout> | undefined;
       const interval = setInterval(() => {
         setProcessingStageIndex((prev) => {
           if (prev < processingStages.length - 1) {
             return prev + 1;
           } else {
             clearInterval(interval);
-            setTimeout(() => {
+            completionTimeout = setTimeout(() => {
               prepareExtractedFields();
-              setStep('verify_extraction');
+              navigateToStep('verify_extraction', 'replace');
             }, 600);
             return prev;
           }
         });
       }, 700);
 
-      return () => clearInterval(interval);
+      return () => {
+        clearInterval(interval);
+        if (completionTimeout) {
+          clearTimeout(completionTimeout);
+        }
+      };
     }
   }, [step]);
 
@@ -408,7 +478,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
 
           <div className="pt-4 flex justify-end">
             <button
-              onClick={() => setStep('input_method')}
+              onClick={() => navigateToStep('input_method')}
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs shadow-xs transition-colors"
             >
               <span>Continue with {productType === 'durable' ? 'Durable Goods' : 'Beauty & Cosmetics'}</span>
@@ -429,7 +499,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
               <p className="text-xs text-slate-500">How would you like to provide proof records for your {productType}?</p>
             </div>
             <button
-              onClick={() => setStep('select_type')}
+              onClick={() => navigateToPreviousStep('select_type')}
               className="text-xs font-semibold text-slate-500 hover:text-slate-800"
             >
               Change Domain
@@ -440,7 +510,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
             
             {/* Scan / Camera */}
             <div
-              onClick={() => { setInputMethod('scan'); setStep('upload_or_scan'); }}
+              onClick={() => { setInputMethod('scan'); navigateToStep('upload_or_scan'); }}
               className="p-5 rounded-2xl bg-white border border-slate-200 hover:border-indigo-400 cursor-pointer shadow-xs hover:shadow-md transition-all group flex flex-col justify-between"
             >
               <div>
@@ -457,7 +527,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
 
             {/* Upload PDF */}
             <div
-              onClick={() => { setInputMethod('pdf'); setStep('upload_or_scan'); }}
+              onClick={() => { setInputMethod('pdf'); navigateToStep('upload_or_scan'); }}
               className="p-5 rounded-2xl bg-white border border-slate-200 hover:border-indigo-400 cursor-pointer shadow-xs hover:shadow-md transition-all group flex flex-col justify-between"
             >
               <div>
@@ -474,7 +544,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
 
             {/* Manual Entry */}
             <div
-              onClick={() => { setInputMethod('manual'); setStep('upload_or_scan'); }}
+              onClick={() => { setInputMethod('manual'); navigateToStep('upload_or_scan'); }}
               className="p-5 rounded-2xl bg-white border border-slate-200 hover:border-indigo-400 cursor-pointer shadow-xs hover:shadow-md transition-all group flex flex-col justify-between"
             >
               <div>
@@ -511,7 +581,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
               </p>
             </div>
             <button
-              onClick={() => setStep('input_method')}
+              onClick={() => navigateToPreviousStep('input_method')}
               className="text-xs font-semibold text-slate-500 hover:text-slate-800"
             >
               Change Ingestion Method
@@ -714,7 +784,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
             </span>
 
             <button
-              onClick={() => setStep('processing')}
+              onClick={() => navigateToStep('processing')}
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs shadow-xs transition-colors"
             >
               <span>Begin Intelligent Processing &rarr;</span>
