@@ -24,7 +24,6 @@ import {
   Scale
 } from 'lucide-react';
 import { Product, DurableProduct, ProductClaim, AppRoute, ProductDocument } from '../types';
-import { INITIAL_CLAIMS } from '../data/mockData';
 
 interface WarrantyClaimsViewProps {
   products: Product[];
@@ -39,8 +38,9 @@ export const WarrantyClaimsView: React.FC<WarrantyClaimsViewProps> = ({
   onSelectProduct,
   onTriggerToast
 }) => {
-  // Claims state (initialized with rich mock data)
-  const [claims, setClaims] = useState<ProductClaim[]>(INITIAL_CLAIMS);
+  // Claims are session-local (no backend table exists for claims yet).
+  // Starts empty — populated only by claims the user files in this session.
+  const [claims, setClaims] = useState<ProductClaim[]>([]);
   const [activeTab, setActiveTab] = useState<'dossiers' | 'auditor'>('dossiers');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Preparing' | 'Submitted' | 'Approved' | 'Rejected'>('All');
   const [searchQuery, setSearchQuery] = useState('');
@@ -205,14 +205,17 @@ export const WarrantyClaimsView: React.FC<WarrantyClaimsViewProps> = ({
             </p>
             <span className="text-xs text-slate-400 font-medium">of {claims.length} total</span>
           </div>
-          <p className="text-xs text-slate-400 mt-1">1 In Progress, 2 Approved, 1 Rejected</p>
+          <p className="text-xs text-slate-400 mt-1">
+            {claims.filter(c => c.status === 'Preparing').length} Preparing, {claims.filter(c => c.status === 'Approved').length} Approved, {claims.filter(c => c.status === 'Rejected').length} Rejected
+          </p>
         </div>
 
         <div className="bg-white rounded-2xl border border-indigo-200/80 p-4 sm:p-5 shadow-2xs bg-indigo-50/20">
           <p className="text-xs font-bold text-indigo-700 uppercase tracking-wider">Avg. Readiness Score</p>
           <div className="flex items-baseline gap-2 mt-1">
-            <p className="text-2xl sm:text-3xl font-bold text-indigo-700">89%</p>
-            <span className="text-xs text-indigo-600 font-medium">+14% vs unindexed</span>
+            <p className="text-2xl sm:text-3xl font-bold text-indigo-700">
+              {claims.length > 0 ? `${Math.round(claims.reduce((sum, c) => sum + c.evidenceCompleteness, 0) / claims.length)}%` : '—'}
+            </p>
           </div>
           <p className="text-xs text-indigo-600/80 mt-1">High-evidence dossier confidence</p>
         </div>
@@ -220,8 +223,13 @@ export const WarrantyClaimsView: React.FC<WarrantyClaimsViewProps> = ({
         <div className="bg-white rounded-2xl border border-emerald-200/80 p-4 sm:p-5 shadow-2xs bg-emerald-50/20">
           <p className="text-xs font-bold text-emerald-700 uppercase tracking-wider">Estimated Recovery</p>
           <div className="flex items-baseline gap-2 mt-1">
-            <p className="text-2xl sm:text-3xl font-bold text-emerald-700">$1,850</p>
-            <span className="text-xs text-emerald-600 font-medium">USD</span>
+            <p className="text-2xl sm:text-3xl font-bold text-emerald-700">
+              {(() => {
+                const total = claims.reduce((sum, c) => sum + (parseFloat((c.claimAmount || '').replace(/[^0-9.]/g, '')) || 0), 0);
+                return total > 0 ? `$${total.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—';
+              })()}
+            </p>
+            {claims.length > 0 && <span className="text-xs text-emerald-600 font-medium">USD</span>}
           </div>
           <p className="text-xs text-emerald-600/80 mt-1">Covered hardware parts &amp; labor</p>
         </div>
@@ -229,10 +237,17 @@ export const WarrantyClaimsView: React.FC<WarrantyClaimsViewProps> = ({
         <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs">
           <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Resolution Rate</p>
           <div className="flex items-baseline gap-2 mt-1">
-            <p className="text-2xl sm:text-3xl font-bold text-slate-900">80%</p>
-            <span className="text-xs text-teal-600 font-medium">Favorable</span>
+            <p className="text-2xl sm:text-3xl font-bold text-slate-900">
+              {(() => {
+                const resolved = claims.filter(c => c.status === 'Approved' || c.status === 'Rejected');
+                if (resolved.length === 0) return '—';
+                return `${Math.round((claims.filter(c => c.status === 'Approved').length / resolved.length) * 100)}%`;
+              })()}
+            </p>
           </div>
-          <p className="text-xs text-slate-400 mt-1">4 of 5 disputes accepted</p>
+          <p className="text-xs text-slate-400 mt-1">
+            {claims.filter(c => c.status === 'Approved').length} of {claims.filter(c => c.status === 'Approved' || c.status === 'Rejected').length} disputes accepted
+          </p>
         </div>
       </div>
 
@@ -383,6 +398,12 @@ export const WarrantyClaimsView: React.FC<WarrantyClaimsViewProps> = ({
               );
             })}
           </div>
+
+          {filteredClaims.length === 0 && (
+            <div className="text-center py-16 text-sm text-slate-500 bg-white rounded-2xl border border-dashed border-slate-200">
+              No claims filed yet. Use &quot;File New Claim&quot; to start a claim dossier for one of your products.
+            </div>
+          )}
 
         </div>
       )}

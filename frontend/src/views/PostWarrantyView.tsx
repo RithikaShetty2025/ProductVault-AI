@@ -17,7 +17,6 @@ import {
   Tag
 } from 'lucide-react';
 import { Product, DurableProduct, AppRoute, PriceComparisonItem } from '../types';
-import { PRICE_COMPARISONS } from '../data/mockData';
 
 interface PostWarrantyViewProps {
   products: Product[];
@@ -43,48 +42,19 @@ export const PostWarrantyView: React.FC<PostWarrantyViewProps> = ({
 
   const activeProduct = durableProducts.find(p => p.id === selectedProductId) || durableProducts[0];
 
-  // Renewal plans for the active product
-  const plans = [
-    {
-      id: 'plan-1',
-      provider: activeProduct.brand === 'Apple' ? 'AppleCare+ Extension' : `${activeProduct.brand} Extended Care`,
-      price: '$9.99 / mo or $99 / yr',
-      coverage: 'Comprehensive accidental liquid & drops, unlimited repairs, $29 screen excess, priority phone tech support.',
-      term: 'Annual renewable',
-      recommended: true
-    },
-    {
-      id: 'plan-2',
-      provider: 'Asurion Home+ Multi-Device',
-      price: '$24.99 / mo',
-      coverage: 'Covers up to 10 household devices against mechanical failure, surges, and drops after original manufacturer expiration.',
-      term: 'Monthly subscription',
-      recommended: false
-    },
-    {
-      id: 'plan-3',
-      provider: 'SquareTrade / Allstate Protection',
-      price: '$79.00 / 2 Years',
-      coverage: '100% parts and labor, 5-day guarantee turnaround, zero deductible on electrical failures.',
-      term: 'Fixed 24-Month Term',
-      recommended: false
-    }
-  ];
+  if (!activeProduct) {
+    return (
+      <div className="max-w-xl mx-auto text-center py-20 text-slate-500 text-sm">
+        Add a durable product to see post-warranty and upgrade advisory options.
+      </div>
+    );
+  }
 
-  // Upgrades list from mock data
-  const comparisons: PriceComparisonItem[] = activeProduct && (PRICE_COMPARISONS[activeProduct.id] || [
-    {
-      id: 'pc-gen-1',
-      currentProductId: activeProduct.id,
-      modelName: `${activeProduct.brand} Next-Gen Flagship Series`,
-      brand: activeProduct.brand,
-      price: '$1,399.00',
-      keySpecs: 'Next-Gen Silicon Architecture, 32GB Unified Memory, High Efficiency Battery',
-      similarityPercentage: 94,
-      availability: 'In Stock',
-      recommendedFor: 'Natural modern evolution with double compute throughput.'
-    }
-  ]);
+  // No backend source exists yet for extended-protection plan offers or
+  // market upgrade comparisons, so both lists start empty rather than
+  // showing fabricated providers/prices.
+  const plans: { id: string; provider: string; price: string; coverage: string; term: string; recommended: boolean }[] = [];
+  const comparisons: PriceComparisonItem[] = [];
 
   const handleEnrollPlan = (provider: string) => {
     onTriggerToast('success', 'Plan Selected', `Enrolled ${activeProduct.name} in ${provider}. Renewal certificate logged.`);
@@ -154,11 +124,6 @@ export const PostWarrantyView: React.FC<PostWarrantyViewProps> = ({
               <span className="text-slate-400 block text-[10px] uppercase font-bold">Expires</span>
               <span className="font-semibold text-slate-800">{activeProduct.warrantyExpiryDate}</span>
             </div>
-            <div className="h-6 w-px bg-slate-200" />
-            <div>
-              <span className="text-slate-400 block text-[10px] uppercase font-bold">Estimated Trade-In</span>
-              <span className="font-bold text-teal-700">$580 - $720</span>
-            </div>
           </div>
         </div>
       </div>
@@ -218,6 +183,12 @@ export const PostWarrantyView: React.FC<PostWarrantyViewProps> = ({
             </div>
           ))}
         </div>
+
+        {plans.length === 0 && (
+          <div className="text-center py-12 text-sm text-slate-500 bg-white rounded-2xl border border-dashed border-slate-200">
+            Extended protection plan offers are not available yet.
+          </div>
+        )}
       </div>
 
       {/* SECTION 2: MARKET UPGRADE & REPLACEMENT INTELLIGENCE */}
@@ -279,6 +250,12 @@ export const PostWarrantyView: React.FC<PostWarrantyViewProps> = ({
             </div>
           ))}
         </div>
+
+        {comparisons.length === 0 && (
+          <div className="text-center py-12 text-sm text-slate-500 bg-white rounded-2xl border border-dashed border-slate-200">
+            Market upgrade comparisons are not available yet.
+          </div>
+        )}
       </div>
 
     </div>

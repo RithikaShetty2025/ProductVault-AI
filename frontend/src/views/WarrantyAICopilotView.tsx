@@ -20,7 +20,6 @@ import {
   ChevronRight
 } from 'lucide-react';
 import { Product, AppRoute } from '../types';
-import { WARRANTY_AI_KNOWLEDGE_BASE } from '../data/mockData';
 
 interface WarrantyAICopilotViewProps {
   products: Product[];
@@ -48,7 +47,7 @@ export const WarrantyAICopilotView: React.FC<WarrantyAICopilotViewProps> = ({
   onNavigate,
   onSelectProduct
 }) => {
-  const [selectedProductId, setSelectedProductId] = useState<string>('prod-dur-01');
+  const [selectedProductId, setSelectedProductId] = useState<string>(products[0]?.id || '');
   const [inputVal, setInputVal] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -58,15 +57,19 @@ export const WarrantyAICopilotView: React.FC<WarrantyAICopilotViewProps> = ({
   const activeProduct = products.find(p => p.id === selectedProductId) || products[0];
 
   // Initial messages
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'm-1',
-      sender: 'ai',
-      text: `Hello! I am your ProductVault AI Lifecycle Copilot. I analyze manufacturer warranty terms, retail invoices, serial attestations, and cosmetics PAO shelf-life dates across your vault. Currently focused on: ${activeProduct.name}. How can I assist you with coverage, claim preparation, or exclusions?`,
-      timestamp: 'Just now',
-      confidence: 'high'
-    }
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>(
+    activeProduct
+      ? [
+          {
+            id: 'm-1',
+            sender: 'ai',
+            text: `Hello! I am your ProductVault AI Lifecycle Copilot. I analyze manufacturer warranty terms, retail invoices, serial attestations, and cosmetics PAO shelf-life dates across your vault. Currently focused on: ${activeProduct.name}. How can I assist you with coverage, claim preparation, or exclusions?`,
+            timestamp: 'Just now',
+            confidence: 'high'
+          }
+        ]
+      : []
+  );
 
   // Scroll to bottom when messages update
   useEffect(() => {
@@ -75,9 +78,7 @@ export const WarrantyAICopilotView: React.FC<WarrantyAICopilotViewProps> = ({
 
   // Suggested questions based on selected product
   const suggestedQuestions = (() => {
-    if (activeProduct.id in WARRANTY_AI_KNOWLEDGE_BASE) {
-      return WARRANTY_AI_KNOWLEDGE_BASE[activeProduct.id].questions;
-    }
+    if (!activeProduct) return [];
     if (activeProduct.type === 'durable') {
       return [
         `What is covered under the ${activeProduct.brand} warranty?`,
@@ -97,7 +98,7 @@ export const WarrantyAICopilotView: React.FC<WarrantyAICopilotViewProps> = ({
 
   const handleSend = (textToSend?: string) => {
     const query = (textToSend || inputVal).trim();
-    if (!query) return;
+    if (!query || !activeProduct) return;
 
     const userMsgId = `usr-${Date.now()}`;
     const userMsg: ChatMessage = {
@@ -119,14 +120,7 @@ export const WarrantyAICopilotView: React.FC<WarrantyAICopilotViewProps> = ({
       let confidence: 'high' | 'medium' = 'high';
       let actionPrompt: ChatMessage['actionPrompt'] | undefined;
 
-      const kb = WARRANTY_AI_KNOWLEDGE_BASE[activeProduct.id];
-      if (kb && kb.answers[query]) {
-        const entry = kb.answers[query];
-        replyText = entry.answer;
-        clauseCited = entry.clause;
-        sourceDoc = entry.source;
-        confidence = entry.confidence;
-      } else if (activeProduct.type === 'durable') {
+      if (activeProduct.type === 'durable') {
         const dur = activeProduct;
         if (query.toLowerCase().includes('drop') || query.toLowerCase().includes('liquid') || query.toLowerCase().includes('accident')) {
           replyText = `Under the standard ${dur.brand} Limited Warranty for ${dur.name}, accidental damage, chassis denting, drops, and liquid submersion are explicitly excluded from free repair coverage. An extended plan like AppleCare+ or Comprehensive Protection is required for accidental handling damage.`;
@@ -207,6 +201,10 @@ export const WarrantyAICopilotView: React.FC<WarrantyAICopilotViewProps> = ({
   };
 
   const handleClearHistory = () => {
+    if (!activeProduct) {
+      setMessages([]);
+      return;
+    }
     setMessages([
       {
         id: `m-init-${Date.now()}`,
@@ -217,6 +215,14 @@ export const WarrantyAICopilotView: React.FC<WarrantyAICopilotViewProps> = ({
       }
     ]);
   };
+
+  if (!activeProduct) {
+    return (
+      <div className="max-w-xl mx-auto text-center py-20 text-slate-500 text-sm">
+        Add a product to your vault to start a conversation with the Warranty AI Copilot.
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 max-w-6xl mx-auto pb-16">

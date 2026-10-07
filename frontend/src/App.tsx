@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { AppRoute, Product, AttentionItem, ActivityItem } from './types';
-import { INITIAL_PRODUCTS, ATTENTION_ITEMS, ACTIVITY_FEED } from './data/mockData';
+import { fetchUserProducts, deriveAttentionItems } from './lib/dataService';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { ToastContainer, ToastMessage } from './components/Toast';
@@ -90,17 +90,48 @@ export default function App() {
 
   // Routing state
   const [currentRoute, setCurrentRoute] = useState<AppRoute>('/dashboard');
-  const [selectedProductId, setSelectedProductId] = useState<string | null>('prod-dur-01');
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
   const [productsFilterCategory, setProductsFilterCategory] = useState<'all' | 'durable' | 'beauty' | 'attention'>('all');
 
   // Layout UI state
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
 
-  // Centralized Data state
-  const [products, setProducts] = useState<Product[]>(INITIAL_PRODUCTS);
-  const [attentionItems, setAttentionItems] = useState<AttentionItem[]>(ATTENTION_ITEMS);
-  const [activityFeed, setActivityFeed] = useState<ActivityItem[]>(ACTIVITY_FEED);
+  // Centralized Data state — always starts empty; real data only, never mock.
+  const [products, setProducts] = useState<Product[]>([]);
+  const [attentionItems, setAttentionItems] = useState<AttentionItem[]>([]);
+  const [activityFeed, setActivityFeed] = useState<ActivityItem[]>([]);
+  const [productsLoading, setProductsLoading] = useState<boolean>(false);
+
+  // Loads real products (and derives attention items) for the signed-in
+  // Supabase user. In local sandbox mode there is no backend account, so
+  // the vault simply stays empty rather than showing fabricated data.
+  const loadUserData = async (userId: string) => {
+    setProductsLoading(true);
+    try {
+      const fetched = await fetchUserProducts(userId);
+      setProducts(fetched);
+      setAttentionItems(deriveAttentionItems(fetched));
+    } catch (err: any) {
+      addToast('error', 'Failed to Load Vault', err.message || 'Could not fetch your products.');
+      setProducts([]);
+      setAttentionItems([]);
+    } finally {
+      setProductsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (session) {
+      loadUserData(session.user.id);
+    } else if (!isDemoMode) {
+      setProducts([]);
+      setAttentionItems([]);
+      setActivityFeed([]);
+      setSelectedProductId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.user.id]);
 
   // Toasts state
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -221,13 +252,21 @@ export default function App() {
     }));
   };
 
-  // Reset Demo Data Handler
+  // Reload Vault Handler — re-fetches real data from Supabase for the
+  // signed-in user (local sandbox mode has no backend data to reload).
   const handleResetDemoData = () => {
-    setProducts(INITIAL_PRODUCTS);
-    setAttentionItems(ATTENTION_ITEMS);
-    setActivityFeed(ACTIVITY_FEED);
-    setSelectedProductId('prod-dur-01');
-    addToast('info', 'Vault Reset', 'All products and intelligence feeds restored to initial demo state.');
+    if (isDemoMode) {
+      setProducts([]);
+      setAttentionItems([]);
+      setActivityFeed([]);
+      setSelectedProductId(null);
+      addToast('info', 'Sandbox Cleared', 'Local sandbox mode has no persisted data to reload.');
+      return;
+    }
+    if (session) {
+      loadUserData(session.user.id);
+      addToast('info', 'Vault Reloaded', 'Refetched your products and documents from Supabase.');
+    }
   };
 
   // Authentication Handlers
@@ -343,10 +382,11 @@ export default function App() {
     );
   }
 
-  // Active product lookup for detail route
-  const currentProduct = selectedProductId 
-    ? products.find(p => p.id === selectedProductId) || products[0]
-    : products[0];
+  // Active product lookup for detail route — no fallback to products[0];
+  // if the selected id doesn't resolve to a real product, show empty state.
+  const currentProduct = selectedProductId
+    ? products.find(p => p.id === selectedProductId)
+    : undefined;
 
   return (
     <div className="min-h-screen font-sans antialiased text-slate-900 bg-[#F4F6F8] flex flex-col">
@@ -409,7 +449,7 @@ export default function App() {
           />
         )}
 
-        {currentRoute.startsWith('/products/') && currentRoute !== '/products/new' && (
+        {currentRoute.startsWith('/products/') && currentRoute !== '/products/new' && currentProduct && (
           <ProductDetailView
             product={currentProduct}
             onBack={() => handleNavigate('/products')}
@@ -419,10 +459,17 @@ export default function App() {
           />
         )}
 
+        {currentRoute.startsWith('/products/') && currentRoute !== '/products/new' && !currentProduct && (
+          <div className="max-w-xl mx-auto text-center py-20 text-slate-500 text-sm">
+            {productsLoading ? 'Loading your products…' : 'This product could not be found. It may have been removed, or you have no products yet.'}
+          </div>
+        )}
+
         {currentRoute === '/products/new' && (
           <AddProductWizard
             onAddProduct={handleAddProduct}
             onBack={() => handleNavigate('/products')}
+            isDemoMode={isDemoMode}
           />
         )}
 

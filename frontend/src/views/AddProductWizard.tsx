@@ -23,10 +23,13 @@ import {
   Info
 } from 'lucide-react';
 import { Product, ProductType, ExtractedField, ProductDocument, ConfidenceLevel, VerificationStatus } from '../types';
+import { supabase } from '../lib/supabaseClient';
+import { readDocument, validateFile } from '../lib/documentReader';
 
 interface AddProductWizardProps {
   onAddProduct: (newProduct: Product) => void;
   onBack: () => void;
+  isDemoMode: boolean;
 }
 
 type WizardStep = 'select_type' | 'input_method' | 'upload_or_scan' | 'processing' | 'verify_extraction';
@@ -39,30 +42,62 @@ interface UploadedFileItem {
   size: string;
   previewUrl?: string;
   status: 'uploaded' | 'processing' | 'ready';
+  file?: File;
 }
 
-export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct, onBack }) => {
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function rankConfidence(c: ConfidenceLevel): number {
+  return c === 'high' ? 3 : c === 'medium' ? 2 : 1;
+}
+
+const DOCUMENT_TYPE_DB_MAP: Record<string, string> = {
+  'Invoice': 'invoice',
+  'Warranty Document': 'warranty_card',
+  'Product Label': 'product_label',
+  'Service Receipt': 'service_receipt',
+  'Claim Evidence': 'claim_evidence',
+  'Claim Rejection Document': 'claim_rejection',
+  'Batch Code Sticker': 'batch_code_sticker',
+  'Packaging Scan': 'packaging_scan',
+  'Other Record': 'other',
+};
+
+export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct, onBack, isDemoMode }) => {
   const [step, setStep] = useState<WizardStep>('select_type');
   const [productType, setProductType] = useState<ProductType>('durable');
   const [inputMethod, setInputMethod] = useState<InputMethod>('pdf');
+  const [realProductId, setRealProductId] = useState<string | null>(null);
+  const [processingError, setProcessingError] = useState<string | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
-  // Uploaded files
-  const [files, setFiles] = useState<UploadedFileItem[]>([
-    {
-      id: 'f-init-1',
-      name: 'Retail_Store_Purchase_Receipt.pdf',
-      type: 'Invoice',
-      size: '1.4 MB',
-      status: 'ready'
-    },
-    {
-      id: 'f-init-2',
-      name: 'Manufacturer_Warranty_Card.pdf',
-      type: 'Warranty Document',
-      size: '890 KB',
-      status: 'ready'
-    }
-  ]);
+  // Uploaded files. The two sample entries are only meaningful in the local
+  // sandbox/demo flow (they have no real File object behind them); real
+  // sessions start with an empty queue and must upload actual files.
+  const [files, setFiles] = useState<UploadedFileItem[]>(
+    isDemoMode
+      ? [
+          {
+            id: 'f-init-1',
+            name: 'Retail_Store_Purchase_Receipt.pdf',
+            type: 'Invoice',
+            size: '1.4 MB',
+            status: 'ready'
+          },
+          {
+            id: 'f-init-2',
+            name: 'Manufacturer_Warranty_Card.pdf',
+            type: 'Warranty Document',
+            size: '890 KB',
+            status: 'ready'
+          }
+        ]
+      : []
+  );
 
   // Scan simulation states
   const [isScanning, setIsScanning] = useState(false);
@@ -91,9 +126,10 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
   const [manualDate, setManualDate] = useState('2026-09-15');
   const [manualPrice, setManualPrice] = useState('$499.00');
 
-  // Trigger processing step timer
+  // Trigger processing step timer — only for the local sandbox/demo flow.
+  // Real (authenticated) sessions run the actual upload/OCR/Gemini pipeline instead.
   useEffect(() => {
-    if (step === 'processing') {
+    if (step === 'processing' && isDemoMode) {
       setProcessingStageIndex(0);
       const interval = setInterval(() => {
         setProcessingStageIndex((prev) => {
@@ -112,7 +148,187 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
 
       return () => clearInterval(interval);
     }
-  }, [step]);
+  }, [step, isDemoMode]);
+
+  // Real processing pipeline: upload each file to Supabase Storage, read its
+  // text (PDF text layer or OCR), send that text to the Gemini edge function,
+  // and persist the resulting fields. Runs only for real (non-demo) sessions
+  // uploading actual files.
+  useEffect(() => {
+    if (step === 'processing' && !isDemoMode) {
+      runRealExtraction();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, isDemoMode]);
+
+  const runRealExtraction = async () => {
+    setProcessingError(null);
+    try {
+      setProcessingStageIndex(0);
+      const { data: { session } } = await supabase.auth.getSession();
+      const userId = session?.user.id;
+      if (!userId) throw new Error('You must be signed in to upload documents.');
+
+      const realFiles = files.filter(f => f.file);
+      if (realFiles.length === 0) {
+        throw new Error('No real files were selected. Please upload a PDF, JPG, or PNG file.');
+      }
+
+      const { data: productRow, error: productError } = await supabase
+        .from('products')
+        .insert({ user_id: userId, type: productType, status: 'draft' })
+        .select()
+        .single();
+      if (productError || !productRow) {
+        throw new Error(productError?.message || 'Failed to create product record.');
+      }
+      const newProductId = productRow.id as string;
+      setRealProductId(newProductId);
+
+      const allExtracted: ExtractedField[] = [];
+
+      for (const item of realFiles) {
+        setProcessingStageIndex(1); // Reading document layouts
+        const timestamp = Date.now();
+        const safeName = item.file!.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const storagePath = `${userId}/${newProductId}/${timestamp}-${safeName}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from('product-documents')
+          .upload(storagePath, item.file!, { contentType: item.file!.type });
+        if (uploadError) throw new Error(`Upload failed for ${item.name}: ${uploadError.message}`);
+
+        const { data: docRow, error: docError } = await supabase
+          .from('documents')
+          .insert({
+            user_id: userId,
+            product_id: newProductId,
+            document_type: DOCUMENT_TYPE_DB_MAP[item.type] || 'other',
+            file_name: item.name,
+            storage_path: storagePath,
+            mime_type: item.file!.type,
+            file_size: item.file!.size,
+            processing_status: 'reading',
+          })
+          .select()
+          .single();
+        if (docError || !docRow) throw new Error(docError?.message || 'Failed to record document.');
+
+        let readResult;
+        try {
+          readResult = await readDocument(item.file!);
+        } catch (err) {
+          await supabase.from('documents').update({
+            processing_status: 'error',
+            processing_error: (err as Error).message,
+          }).eq('id', docRow.id);
+          continue;
+        }
+
+        setProcessingStageIndex(2); // Extracting information
+        await supabase.from('documents').update({
+          ocr_text: readResult.ocrText,
+          ocr_confidence: readResult.ocrConfidence,
+          extraction_method: readResult.extractionMethod,
+          page_count: readResult.pageCount,
+          processing_status: 'extracting',
+        }).eq('id', docRow.id);
+
+        // supabase.functions.invoke() is supposed to attach the current
+        // session's access token automatically, but if that internal lookup
+        // ever misses (stale session reference), the request goes out with
+        // no Authorization header and Supabase's gateway rejects it before
+        // our function even runs. Fetch the token explicitly and pass it so
+        // this can't silently fail.
+        const { data: { session: invokeSession } } = await supabase.auth.getSession();
+        if (!invokeSession?.access_token) {
+          throw new Error('Your session has expired. Please sign in again and retry.');
+        }
+        const { data: geminiData, error: geminiError } = await supabase.functions.invoke('gemini-extract', {
+          body: { ocrText: readResult.ocrText, productType },
+          headers: { Authorization: `Bearer ${invokeSession.access_token}` },
+        });
+        if (geminiError) {
+          // supabase-js only gives a generic "non-2xx status code" message by
+          // default; the actual reason is in the function's JSON error body
+          // (available on FunctionsHttpError via `.context`, the raw Response).
+          let detailedMessage = geminiError.message;
+          const context = (geminiError as { context?: Response }).context;
+          if (context && typeof context.json === 'function') {
+            try {
+              const body = await context.clone().json();
+              if (body?.error) detailedMessage = body.error;
+            } catch {
+              // response wasn't JSON; fall back to the generic message
+            }
+          }
+          await supabase.from('documents').update({
+            processing_status: 'error',
+            processing_error: detailedMessage,
+          }).eq('id', docRow.id);
+          setProcessingError(`AI extraction failed for ${item.name}: ${detailedMessage}`);
+          continue;
+        }
+
+        setProcessingStageIndex(3); // Checking confidence scores
+        const fields: Array<{ key: string; label: string; value: string; confidence: ConfidenceLevel }> =
+          geminiData?.fields || [];
+
+        for (const f of fields) {
+          const status: VerificationStatus = f.confidence === 'low' ? 'needs_review' : 'pending';
+          const confidenceNumeric = f.confidence === 'high' ? 0.9 : f.confidence === 'medium' ? 0.6 : 0.3;
+
+          const { data: fieldRow } = await supabase
+            .from('extracted_fields')
+            .insert({
+              user_id: userId,
+              product_id: newProductId,
+              document_id: docRow.id,
+              field_key: f.key,
+              field_label: f.label,
+              value: f.value,
+              original_extracted_value: f.value,
+              confidence: confidenceNumeric,
+              status,
+            })
+            .select()
+            .single();
+
+          allExtracted.push({
+            id: fieldRow?.id || `ext-${f.key}-${docRow.id}`,
+            key: f.key,
+            label: f.label,
+            value: f.value,
+            sourceDoc: item.name,
+            confidence: f.confidence,
+            status,
+          });
+        }
+
+        await supabase.from('documents').update({ processing_status: 'extracted' }).eq('id', docRow.id);
+      }
+
+      setProcessingStageIndex(4); // Comparing documents
+      const mergedByKey = new Map<string, ExtractedField>();
+      for (const f of allExtracted) {
+        const existing = mergedByKey.get(f.key);
+        if (!existing || rankConfidence(f.confidence) > rankConfidence(existing.confidence)) {
+          mergedByKey.set(f.key, f);
+        }
+      }
+      const finalFields = Array.from(mergedByKey.values());
+      if (finalFields.length === 0) {
+        throw new Error('No fields could be extracted from the uploaded documents. Try manual entry instead.');
+      }
+
+      setExtractedFields(finalFields);
+      setProcessingStageIndex(5); // Ready for verification
+      setTimeout(() => setStep('verify_extraction'), 400);
+    } catch (err) {
+      setProcessingError((err as Error).message);
+      setStep('upload_or_scan');
+    }
+  };
 
   const prepareExtractedFields = () => {
     if (productType === 'durable') {
@@ -155,14 +371,128 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
     setEditingFieldId(null);
   };
 
-  const handleFinalSave = () => {
-    const id = `prod-new-${Date.now()}`;
-    const nameField = extractedFields.find(f => f.key === 'productName')?.value || (productType === 'durable' ? 'Sony PlayStation 5 Pro' : 'Hydra-Plump Water Cream');
-    const brandField = extractedFields.find(f => f.key === 'brand')?.value || (productType === 'durable' ? 'Sony' : 'Tatcha');
-    const purchaseDateField = extractedFields.find(f => f.key === 'purchaseDate')?.value || '2026-09-15';
-    const purchasePriceField = extractedFields.find(f => f.key === 'purchasePrice')?.value || '$699.99';
-    const sellerField = extractedFields.find(f => f.key === 'seller')?.value || 'Authorized Retailer';
-    const expiryField = extractedFields.find(f => f.key === 'warrantyExpiryDate')?.value || extractedFields.find(f => f.key === 'expiryDate')?.value || '2028-09-15';
+  // Manual entry never has documents to OCR, so it skips the processing
+  // pipeline and goes straight to verification with user-typed values.
+  const handleBeginProcessing = () => {
+    setProcessingError(null);
+    if (isDemoMode) {
+      setStep('processing');
+      return;
+    }
+    if (inputMethod === 'manual') {
+      const manualFields: ExtractedField[] = [
+        { id: 'man-name', key: 'productName', label: 'Product Name', value: manualName, sourceDoc: 'Manual Entry', confidence: 'high' as ConfidenceLevel, status: 'verified' as VerificationStatus },
+        { id: 'man-brand', key: 'brand', label: 'Brand', value: manualBrand, sourceDoc: 'Manual Entry', confidence: 'high' as ConfidenceLevel, status: 'verified' as VerificationStatus },
+        {
+          id: 'man-id',
+          key: productType === 'durable' ? 'serialNumber' : 'batchNumber',
+          label: productType === 'durable' ? 'Serial Number' : 'Batch Code',
+          value: manualIdentifier,
+          sourceDoc: 'Manual Entry',
+          confidence: 'high' as ConfidenceLevel,
+          status: 'verified' as VerificationStatus,
+        },
+        {
+          id: 'man-date',
+          key: productType === 'durable' ? 'purchaseDate' : 'manufacturingDate',
+          label: productType === 'durable' ? 'Purchase Date' : 'Manufacturing Date',
+          value: manualDate,
+          sourceDoc: 'Manual Entry',
+          confidence: 'high' as ConfidenceLevel,
+          status: 'verified' as VerificationStatus,
+        },
+        { id: 'man-price', key: 'purchasePrice', label: 'Purchase Price', value: manualPrice, sourceDoc: 'Manual Entry', confidence: 'high' as ConfidenceLevel, status: 'verified' as VerificationStatus },
+      ].filter(f => f.value && f.value.trim());
+
+      if (manualFields.length === 0) {
+        setProcessingError('Please fill in at least the product name before continuing.');
+        return;
+      }
+
+      setExtractedFields(manualFields);
+      setStep('verify_extraction');
+      return;
+    }
+    setStep('processing');
+  };
+
+  // Creates the backing product row on first save if the real pipeline
+  // (upload/OCR) never ran — e.g. manual entry mode.
+  const ensureRealProductId = async (): Promise<string | null> => {
+    if (realProductId) return realProductId;
+    const { data: { session } } = await supabase.auth.getSession();
+    const userId = session?.user.id;
+    if (!userId) return null;
+    const { data: productRow, error } = await supabase
+      .from('products')
+      .insert({ user_id: userId, type: productType, status: 'draft' })
+      .select()
+      .single();
+    if (error || !productRow) return null;
+    setRealProductId(productRow.id as string);
+    return productRow.id as string;
+  };
+
+  const persistFinalProductToSupabase = async (productId: string) => {
+    const getVal = (key: string) => extractedFields.find(f => f.key === key)?.value || null;
+
+    const updatePayload: Record<string, unknown> = {
+      status: 'active',
+      name: getVal('productName'),
+      brand: getVal('brand'),
+    };
+
+    if (productType === 'durable') {
+      const warrantyMonthsRaw = getVal('warrantyPeriodMonths');
+      const warrantyMonths = warrantyMonthsRaw ? parseInt(warrantyMonthsRaw.replace(/[^0-9]/g, ''), 10) : NaN;
+      Object.assign(updatePayload, {
+        model: getVal('model'),
+        serial_number: getVal('serialNumber'),
+        purchase_date: getVal('purchaseDate') || null,
+        purchase_price: getVal('purchasePrice'),
+        seller: getVal('seller'),
+        warranty_period_months: Number.isFinite(warrantyMonths) ? warrantyMonths : null,
+        warranty_start_date: getVal('warrantyStartDate') || null,
+        warranty_expiry_date: getVal('warrantyExpiryDate') || null,
+      });
+    } else {
+      Object.assign(updatePayload, {
+        batch_number: getVal('batchNumber'),
+        manufacturing_date: getVal('manufacturingDate') || null,
+        expiry_date: getVal('expiryDate') || null,
+        pao_months: getVal('paoMonths'),
+        opened_date: getVal('openedDate') || null,
+      });
+    }
+
+    await supabase.from('products').update(updatePayload).eq('id', productId);
+    await supabase.from('extracted_fields').update({ status: 'verified' }).eq('product_id', productId);
+  };
+
+  const handleFinalSave = async () => {
+    let persistedId: string | null = null;
+    if (!isDemoMode) {
+      persistedId = await ensureRealProductId();
+      if (persistedId) {
+        try {
+          await persistFinalProductToSupabase(persistedId);
+        } catch (err) {
+          setProcessingError((err as Error).message);
+        }
+      }
+    }
+
+    const id = persistedId || `prod-new-${Date.now()}`;
+    // In the local sandbox/demo flow, missing fields fall back to the
+    // illustrative Sony/Tatcha sample data. In a real session there is no
+    // simulated source document to fall back to, so missing fields stay
+    // blank for the user to fill in via the product detail view later.
+    const nameField = extractedFields.find(f => f.key === 'productName')?.value || (isDemoMode ? (productType === 'durable' ? 'Sony PlayStation 5 Pro' : 'Hydra-Plump Water Cream') : '');
+    const brandField = extractedFields.find(f => f.key === 'brand')?.value || (isDemoMode ? (productType === 'durable' ? 'Sony' : 'Tatcha') : '');
+    const purchaseDateField = extractedFields.find(f => f.key === 'purchaseDate')?.value || (isDemoMode ? '2026-09-15' : '');
+    const purchasePriceField = extractedFields.find(f => f.key === 'purchasePrice')?.value || (isDemoMode ? '$699.99' : '');
+    const sellerField = extractedFields.find(f => f.key === 'seller')?.value || (isDemoMode ? 'Authorized Retailer' : '');
+    const expiryField = extractedFields.find(f => f.key === 'warrantyExpiryDate')?.value || extractedFields.find(f => f.key === 'expiryDate')?.value || (isDemoMode ? '2028-09-15' : '');
 
     const mockDocs: ProductDocument[] = files.map((file, idx) => ({
       id: `doc-new-${idx}-${Date.now()}`,
@@ -178,14 +508,14 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
     }));
 
     if (productType === 'durable') {
-      const serialField = extractedFields.find(f => f.key === 'serialNumber')?.value || 'SN-03-8821901-PS';
-      const modelField = extractedFields.find(f => f.key === 'model')?.value || 'CFI-7000B';
+      const serialField = extractedFields.find(f => f.key === 'serialNumber')?.value || (isDemoMode ? 'SN-03-8821901-PS' : '');
+      const modelField = extractedFields.find(f => f.key === 'model')?.value || (isDemoMode ? 'CFI-7000B' : '');
 
       const newDurable: Product = {
         id,
         name: nameField,
         brand: brandField,
-        category: 'Gaming & Consoles',
+        category: isDemoMode ? 'Gaming & Consoles' : 'Electronics',
         type: 'durable',
         model: modelField,
         serialNumber: serialField,
@@ -195,49 +525,51 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
         warrantyStatus: 'active',
         warrantyStartDate: purchaseDateField,
         warrantyExpiryDate: expiryField,
-        warrantyPeriodMonths: 24,
-        warrantyCoverageSummary: '24-Month Manufacturer Warranty covering internal APU processor, power supply, and HDMI 2.1 display port.',
-        warrantyTerms: {
-          coverage: ['Processor and cooling fan failure', 'Optical drive read errors', 'Integrated 2TB SSD memory defects'],
-          exclusions: ['Liquid spills or power surge without surge protector', 'Cosmetic side-plate drops'],
-          conditions: ['Tamper warranty sticker must not be pierced']
-        },
+        warrantyPeriodMonths: isDemoMode ? 24 : 0,
+        warrantyCoverageSummary: isDemoMode ? '24-Month Manufacturer Warranty covering internal APU processor, power supply, and HDMI 2.1 display port.' : '',
+        warrantyTerms: isDemoMode
+          ? {
+              coverage: ['Processor and cooling fan failure', 'Optical drive read errors', 'Integrated 2TB SSD memory defects'],
+              exclusions: ['Liquid spills or power surge without surge protector', 'Cosmetic side-plate drops'],
+              conditions: ['Tamper warranty sticker must not be pierced']
+            }
+          : { coverage: [], exclusions: [], conditions: [] },
         documentsCount: mockDocs.length,
         verifiedFieldsCount: extractedFields.length,
         totalFieldsCount: extractedFields.length,
         hasConflict: false,
-        claimReadinessScore: 90,
+        claimReadinessScore: isDemoMode ? 90 : 70,
         status: 'active',
         createdAt: new Date().toISOString(),
-        image: 'https://images.unsplash.com/photo-1606813907291-d86efa9b94db?auto=format&fit=crop&w=600&q=80',
-        notes: 'Indexed via intelligent multi-document extraction pipeline.',
+        image: isDemoMode ? 'https://images.unsplash.com/photo-1606813907291-d86efa9b94db?auto=format&fit=crop&w=600&q=80' : '',
+        notes: isDemoMode ? 'Indexed via intelligent multi-document extraction pipeline.' : 'Indexed via document extraction pipeline.',
         documents: mockDocs,
         extractedFields,
         conflicts: [],
         issues: [],
-        plannerItems: [
-          { id: 'pl-new-1', title: 'Register device on manufacturer portal for VIP support', deadline: '2026-10-30', type: 'recommended', completed: false, actionTab: 'Overview' }
-        ],
-        renewalPlans: [
-          { id: 'rp-new-1', provider: 'Sony Interactive', planName: 'PlayStation Plus Extended Care', coverage: 'Full accidental damage and dual controller replacement', price: '$49.99 / year', startDate: '2026-09-15', endDate: '2027-09-15', status: 'available' }
-        ],
+        plannerItems: isDemoMode
+          ? [{ id: 'pl-new-1', title: 'Register device on manufacturer portal for VIP support', deadline: '2026-10-30', type: 'recommended', completed: false, actionTab: 'Overview' }]
+          : [],
+        renewalPlans: isDemoMode
+          ? [{ id: 'rp-new-1', provider: 'Sony Interactive', planName: 'PlayStation Plus Extended Care', coverage: 'Full accidental damage and dual controller replacement', price: '$49.99 / year', startDate: '2026-09-15', endDate: '2027-09-15', status: 'available' }]
+          : [],
         timeline: [
-          { id: 'tl-new-1', date: 'Sep 29, 2026', title: 'Product Added to Vault', description: `New ${nameField} ingested via ${inputMethod === 'scan' ? 'Mobile Camera Scan' : 'PDF Document Extraction'}.`, category: 'product' },
-          { id: 'tl-new-2', date: 'Sep 29, 2026', title: 'Documents Extracted & Verified', description: `${extractedFields.length} critical fields checked with 100% human-in-the-loop attestation.`, category: 'verification' }
+          { id: 'tl-new-1', date: new Date().toISOString().slice(0, 10), title: 'Product Added to Vault', description: `New ${nameField || 'product'} ingested via ${inputMethod === 'scan' ? 'Mobile Camera Scan' : inputMethod === 'manual' ? 'Manual Entry' : 'PDF Document Extraction'}.`, category: 'product' },
+          { id: 'tl-new-2', date: new Date().toISOString().slice(0, 10), title: 'Documents Extracted & Verified', description: `${extractedFields.length} critical fields checked with 100% human-in-the-loop attestation.`, category: 'verification' }
         ]
       };
       onAddProduct(newDurable);
     } else {
-      const batchField = extractedFields.find(f => f.key === 'batchNumber')?.value || 'TA-9902B';
-      const mfgField = extractedFields.find(f => f.key === 'manufacturingDate')?.value || '2025-11-20';
-      const paoField = extractedFields.find(f => f.key === 'paoMonths')?.value || '6M';
-      const openedDateField = extractedFields.find(f => f.key === 'openedDate')?.value || '2026-09-20';
+      const batchField = extractedFields.find(f => f.key === 'batchNumber')?.value || (isDemoMode ? 'TA-9902B' : '');
+      const mfgField = extractedFields.find(f => f.key === 'manufacturingDate')?.value || (isDemoMode ? '2025-11-20' : '');
+      const paoField = extractedFields.find(f => f.key === 'paoMonths')?.value || (isDemoMode ? '6M' : '');
+      const openedDateField = extractedFields.find(f => f.key === 'openedDate')?.value || (isDemoMode ? '2026-09-20' : '');
 
       const newBeauty: Product = {
         id,
         name: nameField,
         brand: brandField,
-        category: 'Skincare',
+        category: isDemoMode ? 'Skincare' : 'Beauty',
         type: 'beauty',
         batchNumber: batchField,
         manufacturingDate: mfgField,
@@ -245,21 +577,21 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
         paoMonths: paoField,
         openedDate: openedDateField,
         openedStatus: 'fresh',
-        usagePeriodDays: 9,
-        allergensWarning: ['Fragrance-free', 'Dermatologist tested'],
-        volumeSize: '50ml',
-        purchasePrice: '$68.00',
-        seller: 'Sephora Regent St',
+        usagePeriodDays: isDemoMode ? 9 : 0,
+        allergensWarning: isDemoMode ? ['Fragrance-free', 'Dermatologist tested'] : [],
+        volumeSize: isDemoMode ? '50ml' : '',
+        purchasePrice: purchasePriceField,
+        seller: sellerField,
         reminderIntervalDays: 30,
         status: 'active',
         createdAt: new Date().toISOString(),
-        image: 'https://images.unsplash.com/photo-1556228720-195a672e8a03?auto=format&fit=crop&w=600&q=80',
-        notes: 'Cosmetic batch lifecycle synchronized with 6-month PAO timer.',
+        image: isDemoMode ? 'https://images.unsplash.com/photo-1556228720-195a672e8a03?auto=format&fit=crop&w=600&q=80' : '',
+        notes: isDemoMode ? 'Cosmetic batch lifecycle synchronized with 6-month PAO timer.' : 'Indexed via document extraction pipeline.',
         documents: mockDocs,
         extractedFields,
         timeline: [
-          { id: 'tl-b-new-1', date: 'Sep 29, 2026', title: 'Product Added to Vault', description: `${nameField} registered into cosmetic batch tracker.`, category: 'product' },
-          { id: 'tl-b-new-2', date: 'Sep 29, 2026', title: 'Opened Date Recorded', description: `Opened on ${openedDateField}. ${paoField} Period-After-Opening countdown active.`, category: 'verification' }
+          { id: 'tl-b-new-1', date: new Date().toISOString().slice(0, 10), title: 'Product Added to Vault', description: `${nameField || 'Product'} registered into cosmetic batch tracker.`, category: 'product' },
+          { id: 'tl-b-new-2', date: new Date().toISOString().slice(0, 10), title: 'Opened Date Recorded', description: `Opened on ${openedDateField || 'unspecified date'}. ${paoField || 'Unspecified'} Period-After-Opening countdown active.`, category: 'verification' }
         ]
       };
       onAddProduct(newBeauty);
@@ -575,21 +907,57 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
             <div className="space-y-4">
               
               {/* Drag and Drop Zone */}
-              <div 
-                onClick={() => {
-                  const newFileName = productType === 'durable' 
-                    ? `Authorized_Retail_Invoice_${Math.floor(1000 + Math.random() * 9000)}.pdf` 
-                    : `Skincare_Box_Batch_Receipt_${Math.floor(1000 + Math.random() * 9000)}.pdf`;
-                  setFiles(prev => [
-                    ...prev,
-                    {
-                      id: `f-${Date.now()}`,
-                      name: newFileName,
-                      type: productType === 'durable' ? 'Invoice' : 'Product Label',
-                      size: '1.8 MB',
-                      status: 'ready'
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                className="hidden"
+                onChange={(e) => {
+                  const selected = Array.from(e.target.files || []);
+                  const validationErrors: string[] = [];
+                  const accepted: UploadedFileItem[] = [];
+
+                  selected.forEach((file) => {
+                    const error = validateFile(file);
+                    if (error) {
+                      validationErrors.push(`${file.name}: ${error}`);
+                      return;
                     }
-                  ]);
+                    accepted.push({
+                      id: `f-${Date.now()}-${Math.random()}`,
+                      name: file.name,
+                      type: productType === 'durable' ? 'Invoice' : 'Product Label',
+                      size: formatBytes(file.size),
+                      status: 'ready',
+                      file,
+                    });
+                  });
+
+                  if (accepted.length) setFiles(prev => [...prev, ...accepted]);
+                  setProcessingError(validationErrors.length ? validationErrors.join(' ') : null);
+                  e.target.value = '';
+                }}
+              />
+              <div
+                onClick={() => {
+                  if (isDemoMode) {
+                    const newFileName = productType === 'durable'
+                      ? `Authorized_Retail_Invoice_${Math.floor(1000 + Math.random() * 9000)}.pdf`
+                      : `Skincare_Box_Batch_Receipt_${Math.floor(1000 + Math.random() * 9000)}.pdf`;
+                    setFiles(prev => [
+                      ...prev,
+                      {
+                        id: `f-${Date.now()}`,
+                        name: newFileName,
+                        type: productType === 'durable' ? 'Invoice' : 'Product Label',
+                        size: '1.8 MB',
+                        status: 'ready'
+                      }
+                    ]);
+                  } else {
+                    fileInputRef.current?.click();
+                  }
                 }}
                 className="border-2 border-dashed border-indigo-200 hover:border-indigo-400 bg-indigo-50/20 hover:bg-indigo-50/40 rounded-2xl p-8 text-center cursor-pointer transition-colors"
               >
@@ -601,9 +969,14 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
                   Supports PDF, JPG, PNG files. Upload invoice receipts, warranty cards, serial stickers, or packaging.
                 </p>
                 <span className="inline-block mt-3 px-3 py-1 bg-white border border-slate-200 rounded-lg text-xs font-semibold text-indigo-600 shadow-2xs">
-                  + Add Sample File to Batch
+                  {isDemoMode ? '+ Add Sample File to Batch' : '+ Browse Files'}
                 </span>
               </div>
+              {processingError && (
+                <p className="text-xs font-semibold text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
+                  {processingError}
+                </p>
+              )}
 
               {/* Uploaded File List Cards */}
               <div className="space-y-2.5">
@@ -714,7 +1087,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({ onAddProduct
             </span>
 
             <button
-              onClick={() => setStep('processing')}
+              onClick={handleBeginProcessing}
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs shadow-xs transition-colors"
             >
               <span>Begin Intelligent Processing &rarr;</span>

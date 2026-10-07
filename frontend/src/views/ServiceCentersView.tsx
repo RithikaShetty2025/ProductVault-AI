@@ -17,7 +17,6 @@ import {
   Sparkles
 } from 'lucide-react';
 import { Product, ServiceCenter, AppRoute } from '../types';
-import { SERVICE_CENTERS } from '../data/mockData';
 
 interface ServiceCentersViewProps {
   products: Product[];
@@ -32,7 +31,9 @@ export const ServiceCentersView: React.FC<ServiceCentersViewProps> = ({
   onSelectProduct,
   onTriggerToast
 }) => {
-  const [centers] = useState<ServiceCenter[]>(SERVICE_CENTERS);
+  // No backend table exists for service centers yet — starts empty rather
+  // than showing fabricated locations.
+  const [centers] = useState<ServiceCenter[]>([]);
   const [brandFilter, setBrandFilter] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -208,6 +209,12 @@ export const ServiceCentersView: React.FC<ServiceCentersViewProps> = ({
           </div>
         ))}
       </div>
+
+      {filteredCenters.length === 0 && (
+        <div className="text-center py-16 text-sm text-slate-500 bg-white rounded-2xl border border-dashed border-slate-200">
+          Authorized service center listings are not available yet.
+        </div>
+      )}
 
       {/* Booking Appointment Modal */}
       {bookingModalCenter && (

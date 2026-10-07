@@ -53,7 +53,6 @@ import {
   ServiceCenter,
   ClaimChecklistItem 
 } from '../types';
-import { SERVICE_CENTERS } from '../data/mockData';
 
 interface ProductDetailViewProps {
   product: Product;
@@ -1946,24 +1945,9 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
             </div>
 
             <div className="space-y-3 max-h-80 overflow-y-auto">
-              {SERVICE_CENTERS.map((sc) => (
-                <div key={sc.id} className="p-3.5 rounded-xl border border-slate-200 hover:border-indigo-300 transition-colors text-xs space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900">{sc.name}</span>
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-teal-50 text-teal-700 border border-teal-200">
-                      {sc.type}
-                    </span>
-                  </div>
-                  <p className="text-slate-500 flex items-center gap-1">
-                    <MapPin className="w-3.5 h-3.5 text-slate-400" />
-                    {sc.address} • {sc.distance}
-                  </p>
-                  <p className="text-slate-500 flex items-center gap-1">
-                    <Phone className="w-3.5 h-3.5 text-slate-400" />
-                    {sc.phone} • Turnaround: {sc.turnaroundTime}
-                  </p>
-                </div>
-              ))}
+              <div className="text-center py-8 text-xs text-slate-500">
+                Authorized service center listings are not available yet.
+              </div>
             </div>
 
             <div className="flex justify-end pt-2">
