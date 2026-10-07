@@ -89,9 +89,76 @@ export default function App() {
   }, []);
 
   // Routing state
-  const [currentRoute, setCurrentRoute] = useState<AppRoute>('/dashboard');
-  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
+  const appRoutes: AppRoute[] = [
+    '/landing',
+    '/dashboard',
+    '/products',
+    '/products/new',
+    '/documents',
+    '/attention',
+    '/claims',
+    '/ai',
+    '/services',
+    '/post-warranty',
+    '/settings',
+    '/login',
+    '/signup'
+  ];
+
+  const getRouteFromLocation = (): AppRoute => {
+    if (typeof window === 'undefined') {
+      return '/dashboard';
+    }
+
+    const path = window.location.pathname || '/';
+    const normalizedPath = path === '/' ? '/dashboard' : path;
+
+    if (normalizedPath.startsWith('/products/')) {
+      return normalizedPath as AppRoute;
+    }
+
+    return appRoutes.includes(normalizedPath as AppRoute)
+      ? (normalizedPath as AppRoute)
+      : '/dashboard';
+  };
+
+  const routeToUrl = (route: AppRoute) => (route === '/dashboard' ? '/' : route);
+
+  const applyRoute = (nextRoute: AppRoute, mode: 'push' | 'replace' = 'push') => {
+    const url = routeToUrl(nextRoute);
+
+    if (mode === 'push') {
+      window.history.pushState({ route: nextRoute }, '', url);
+    } else {
+      window.history.replaceState({ route: nextRoute }, '', url);
+    }
+
+    if (nextRoute.startsWith('/products/') && nextRoute !== '/products/new') {
+      const id = nextRoute.replace('/products/', '');
+      setSelectedProductId(id);
+    }
+
+    setCurrentRoute(nextRoute);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const [currentRoute, setCurrentRoute] = useState<AppRoute>(() => getRouteFromLocation());
+  const [selectedProductId, setSelectedProductId] = useState<string | null>('prod-dur-01');
   const [productsFilterCategory, setProductsFilterCategory] = useState<'all' | 'durable' | 'beauty' | 'attention'>('all');
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const nextRoute = getRouteFromLocation();
+      setCurrentRoute(nextRoute);
+
+      if (nextRoute.startsWith('/products/') && nextRoute !== '/products/new') {
+        setSelectedProductId(nextRoute.replace('/products/', ''));
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // Layout UI state
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
@@ -150,18 +217,12 @@ export default function App() {
 
   // Navigation handler
   const handleNavigate = (route: AppRoute) => {
-    if (route.startsWith('/products/') && route !== '/products/new') {
-      const id = route.replace('/products/', '');
-      setSelectedProductId(id);
-    }
-    setCurrentRoute(route);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    applyRoute(route, 'push');
   };
 
   const handleSelectProduct = (productId: string) => {
-    setSelectedProductId(productId);
-    setCurrentRoute(`/products/${productId}` as AppRoute);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    const nextRoute = `/products/${productId}` as AppRoute;
+    applyRoute(nextRoute, 'push');
   };
 
   // Update product everywhere in local state
@@ -275,7 +336,7 @@ export default function App() {
   // this just handles navigation/UX feedback.
   const handleLoginSuccess = (user: AuthenticatedUser) => {
     setIsDemoMode(false);
-    setCurrentRoute('/dashboard');
+    applyRoute('/dashboard', 'push');
     addToast('success', 'Signed In', `Welcome back, ${user.fullName || user.email}!`);
   };
 
@@ -283,7 +344,7 @@ export default function App() {
     if (isDemoMode) {
       // Local sandbox exit — no Supabase session was ever created.
       setIsDemoMode(false);
-      setCurrentRoute('/landing');
+      applyRoute('/landing', 'push');
       addToast('info', 'Logged Out', 'Exited local sandbox mode.');
       return;
     }
@@ -293,7 +354,7 @@ export default function App() {
       addToast('error', 'Logout Failed', error.message);
       return;
     }
-    setCurrentRoute('/landing');
+    applyRoute('/landing', 'push');
     addToast('info', 'Logged Out', 'Returned to ProductVault public site.');
   };
 
@@ -301,7 +362,7 @@ export default function App() {
   // is created or used). Shared by "Explore Demo" and "Instant Demo Login".
   const handleEnterDemoMode = () => {
     setIsDemoMode(true);
-    setCurrentRoute('/dashboard');
+    applyRoute('/dashboard', 'push');
     addToast('info', 'Demo Mode Activated', 'Exploring pre-seeded ProductVault AI workspace (local sandbox, not a real account).');
   };
 
@@ -435,7 +496,7 @@ export default function App() {
             onSelectProduct={handleSelectProduct}
             onFilterCategory={(type) => {
               setProductsFilterCategory(type);
-              setCurrentRoute('/products');
+              applyRoute('/products', 'push');
             }}
           />
         )}
