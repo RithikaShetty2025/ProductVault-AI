@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Laptop,
   Sparkles,
@@ -12,7 +12,6 @@ import {
   FileText,
   Trash2,
   RefreshCw,
-  Scan,
   Check,
   ChevronRight,
 } from 'lucide-react';
@@ -28,6 +27,7 @@ import {
 
 import { supabase } from '../lib/supabaseClient';
 import { readDocument, validateFile } from '../lib/documentReader';
+import { CameraScanner } from '../components/CameraScanner';
 
 interface AddProductWizardProps {
   onAddProduct: (newProduct: Product) => void;
@@ -256,11 +256,43 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
   // SCAN STATE
   // ============================================================
 
-  const [isScanning, setIsScanning] =
-    useState(false);
-
   const [scanCaptured, setScanCaptured] =
     useState(false);
+
+  const [scanCapturedFileName, setScanCapturedFileName] =
+    useState<string | undefined>(undefined);
+
+  // Handle a real camera capture: push the File into the upload queue
+  const handleCameraCapture = useCallback(
+    (file: File) => {
+      setScanCaptured(true);
+      setScanCapturedFileName(file.name);
+      setFiles((prev) => [
+        ...prev,
+        {
+          id: `f-scan-${Date.now()}`,
+          name: file.name,
+          type:
+            productType === 'durable'
+              ? 'Product Label'
+              : 'Batch Code Sticker',
+          size: `${(file.size / 1024).toFixed(0)} KB`,
+          status: 'ready',
+          file,
+        },
+      ]);
+    },
+    [productType]
+  );
+
+  const handleCameraReset = useCallback(() => {
+    setScanCaptured(false);
+    setScanCapturedFileName(undefined);
+    // Remove any previously captured scan files
+    setFiles((prev) =>
+      prev.filter((f) => !f.id.startsWith('f-scan-'))
+    );
+  }, []);
 
   // ============================================================
   // PROCESSING STATE
@@ -333,6 +365,15 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
 
   const [manualPrice, setManualPrice] =
     useState('$499.00');
+
+  const [manualWarrantyMonths, setManualWarrantyMonths] =
+    useState('12');
+
+  const [manualExpiryDate, setManualExpiryDate] =
+    useState('2028-09-15');
+
+  const [manualPao, setManualPao] =
+    useState('12M');
 
   // ============================================================
   // DEMO PROCESSING ANIMATION
@@ -464,6 +505,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
       setRealProductId(newProductId);
 
       const allExtracted: ExtractedField[] = [];
+      const docErrors: string[] = [];
 
       // --------------------------------------------------------
       // Process every uploaded document
@@ -557,7 +599,8 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
                 (err as Error).message,
             })
             .eq('id', docRow.id);
-
+            
+          docErrors.push(`${item.name} - ${(err as Error).message}`);
           continue;
         }
 
@@ -660,10 +703,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
               docRow.id
             );
 
-          setProcessingError(
-            `AI extraction failed for ${item.name}: ${detailedMessage}`
-          );
-
+          docErrors.push(`${item.name} - AI Extraction Failed: ${detailedMessage}`);
           continue;
         }
 
@@ -680,6 +720,10 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
           confidence: ConfidenceLevel;
         }> =
           geminiData?.fields || [];
+          
+        if (fields.length === 0) {
+          docErrors.push(`${item.name} - AI could not find any relevant product fields in the text.`);
+        }
 
         for (const f of fields) {
           const status: VerificationStatus =
@@ -783,7 +827,9 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
 
       if (finalFields.length === 0) {
         throw new Error(
-          'No fields could be extracted from the uploaded documents. Try manual entry instead.'
+          docErrors.length > 0 
+            ? `Extraction failed:\n${docErrors.join('\n')}` 
+            : 'No fields could be extracted from the uploaded documents. Try manual entry instead.'
         );
       }
 
@@ -1153,8 +1199,42 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
                   status:
                     'verified' as VerificationStatus,
                 } as ExtractedField,
+                {
+                  id: 'man-warranty-months',
+                  key: 'warrantyPeriodMonths',
+                  label: 'Warranty Duration (months)',
+                  value: manualWarrantyMonths,
+                  sourceDoc: 'Manual Entry',
+                  confidence:
+                    'high' as ConfidenceLevel,
+                  status:
+                    'verified' as VerificationStatus,
+                } as ExtractedField,
               ]
-            : []),
+            : [
+                {
+                  id: 'man-expiry',
+                  key: 'expiryDate',
+                  label: 'Factory Expiry Date',
+                  value: manualExpiryDate,
+                  sourceDoc: 'Manual Entry',
+                  confidence:
+                    'high' as ConfidenceLevel,
+                  status:
+                    'verified' as VerificationStatus,
+                } as ExtractedField,
+                {
+                  id: 'man-pao',
+                  key: 'paoMonths',
+                  label: 'PAO (Period After Opening)',
+                  value: manualPao,
+                  sourceDoc: 'Manual Entry',
+                  confidence:
+                    'high' as ConfidenceLevel,
+                  status:
+                    'verified' as VerificationStatus,
+                } as ExtractedField,
+              ]),
         ].filter(
           (field) =>
             field.value &&
@@ -1297,10 +1377,12 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
               getVal(
                 'purchaseDate'
               ),
-            purchase_price:
-              getVal(
-                'purchasePrice'
-              ),
+            purchase_price: (() => {
+              const raw = getVal('purchasePrice');
+              if (!raw) return null;
+              const cleaned = parseFloat(raw.replace(/,/g, ''));
+              return Number.isFinite(cleaned) ? cleaned : null;
+            })(),
             seller: getVal('seller'),
             warranty_period_months:
               Number.isFinite(
@@ -1319,23 +1401,25 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
           }
         );
       } else {
+        const safeDate = (val: string | null) => {
+          if (!val) return null;
+          // Simple regex to check YYYY-MM-DD format
+          return /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : null;
+        };
+
         Object.assign(
           updatePayload,
           {
             batch_number:
-              getVal(
-                'batchNumber'
-              ),
+              getVal('batchNumber'),
             manufacturing_date:
-              getVal(
-                'manufacturingDate'
-              ),
+              safeDate(getVal('manufacturingDate')),
             expiry_date:
-              getVal('expiryDate'),
+              safeDate(getVal('expiryDate')),
             pao_months:
               getVal('paoMonths'),
             opened_date:
-              getVal('openedDate'),
+              safeDate(getVal('openedDate')),
           }
         );
       }
@@ -2261,109 +2345,13 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
              ================================================== */}
 
           {inputMethod === 'scan' && (
-            <div className="bg-slate-950 rounded-2xl p-6 text-white text-center relative overflow-hidden shadow-lg">
-
-              <div className="max-w-md mx-auto aspect-video rounded-xl border-2 border-dashed border-indigo-400/70 relative flex flex-col items-center justify-center bg-slate-900/60 overflow-hidden">
-
-                <div className="absolute inset-x-0 h-0.5 bg-teal-400 shadow-[0_0_8px_#2dd4bf] animate-[bounce_2s_infinite]" />
-
-                <Scan className="w-10 h-10 text-indigo-400 mb-2 animate-pulse" />
-
-                <p className="text-xs font-semibold tracking-wide">
-                  Position document or serial barcode
-                  within frame
-                </p>
-
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Automatic perspective crop &amp;
-                  edge detection active
-                </p>
-
-                {scanCaptured && (
-                  <div className="absolute inset-0 bg-slate-900/90 flex flex-col items-center justify-center p-4">
-                    <CheckCircle2 className="w-10 h-10 text-teal-400 mb-2" />
-
-                    <p className="text-xs font-bold text-white">
-                      Snapshot Captured Successfully
-                    </p>
-
-                    <p className="text-[11px] text-slate-300">
-                      High-resolution frame indexed:
-                      Serial_Barcode_Scan.jpg
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-5 flex items-center justify-center gap-3">
-
-                {!scanCaptured ? (
-                  <button
-                    onClick={() => {
-                      if (!isDemoMode) {
-                        setProcessingError(
-                          'Camera capture is not connected yet. Please upload a JPG or PNG file instead.'
-                        );
-                        return;
-                      }
-
-                      setIsScanning(true);
-
-                      setTimeout(() => {
-                        setIsScanning(false);
-                        setScanCaptured(
-                          true
-                        );
-
-                        setFiles(
-                          (prev) => [
-                            ...prev,
-                            {
-                              id: `f-scan-${Date.now()}`,
-                              name:
-                                productType ===
-                                'durable'
-                                  ? 'Serial_Barcode_Scan.jpg'
-                                  : 'Batch_Code_Macro_Scan.jpg',
-                              type:
-                                productType ===
-                                'durable'
-                                  ? 'Product Label'
-                                  : 'Batch Code Sticker',
-                              size: '2.4 MB',
-                              status:
-                                'ready',
-                            },
-                          ]
-                        );
-                      }, 700);
-                    }}
-                    disabled={isScanning}
-                    className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-semibold text-xs shadow-xs transition-colors flex items-center gap-2"
-                  >
-                    <Camera className="w-4 h-4" />
-
-                    <span>
-                      {isScanning
-                        ? 'Capturing...'
-                        : 'Capture Snapshot'}
-                    </span>
-                  </button>
-                ) : (
-                  <button
-                    onClick={() =>
-                      setScanCaptured(
-                        false
-                      )
-                    }
-                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium"
-                  >
-                    Retake Photo
-                  </button>
-                )}
-
-              </div>
-            </div>
+            <CameraScanner
+              productType={productType}
+              captured={scanCaptured}
+              capturedFileName={scanCapturedFileName}
+              onCapture={handleCameraCapture}
+              onReset={handleCameraReset}
+            />
           )}
 
           {/* ==================================================
@@ -2806,6 +2794,49 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
                       className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl"
                     />
                   </div>
+                )}
+                
+                {productType === 'durable' && (
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      Warranty (Months)
+                    </label>
+                    <input
+                      type="number"
+                      placeholder="e.g. 12"
+                      value={manualWarrantyMonths}
+                      onChange={(e) => setManualWarrantyMonths(e.target.value)}
+                      className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl"
+                    />
+                  </div>
+                )}
+
+                {productType === 'beauty' && (
+                  <>
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Expiry Date
+                      </label>
+                      <input
+                        type="date"
+                        value={manualExpiryDate}
+                        onChange={(e) => setManualExpiryDate(e.target.value)}
+                        className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        PAO (e.g. 12M)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. 6M"
+                        value={manualPao}
+                        onChange={(e) => setManualPao(e.target.value)}
+                        className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl"
+                      />
+                    </div>
+                  </>
                 )}
 
               </div>
