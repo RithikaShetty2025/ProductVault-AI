@@ -625,27 +625,6 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
             processing_status: 'extracting',
           })
           .eq('id', docRow.id);
-        
-          
-console.log(
-  "OCR extraction method:",
-  readResult.extractionMethod
-);
-
-console.log(
-  "OCR page count:",
-  readResult.pageCount
-);
-
-console.log(
-  "OCR text length:",
-  readResult.ocrText?.length ?? 0
-);
-
-console.log(
-  "OCR text extracted:",
-  readResult.ocrText
-);
 
         // ------------------------------------------------------
         // Get current auth token
@@ -683,9 +662,6 @@ console.log(
           }
            
         );
-        console.log("Gemini invocation error:", geminiError);
-   console.log("Gemini response data:", geminiData);
-       
         if (geminiError) {
           let detailedMessage =
             geminiError.message;

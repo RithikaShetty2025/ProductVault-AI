@@ -1294,22 +1294,6 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
             )}
           </div>
 
-          {/* Temporary debug diagnostics — remove once the data-binding fix
-              is verified end-to-end against real saved records. */}
-          <div className="bg-slate-900 text-slate-100 rounded-xl p-4 text-[11px] font-mono space-y-1">
-            <p>product_id: {durable.id}</p>
-            <p>documents: {durable.documentsCount}</p>
-            <p>warrantyClauses: {durable.warrantyClauses?.length ?? 0}</p>
-            <p>
-              categories:{' '}
-              {durable.warrantyClauses && durable.warrantyClauses.length > 0
-                ? Array.from(new Set(durable.warrantyClauses.map((c) => c.category))).join(', ')
-                : 'none'}
-            </p>
-            <p>coverage: {durable.warrantyTerms?.coverage.length ?? 0} | exclusions: {durable.warrantyTerms?.exclusions.length ?? 0} | conditions: {durable.warrantyTerms?.conditions.length ?? 0}</p>
-            <p>warrantyDurationText: {durable.warrantyDurationText || '(empty)'} | warrantyPeriodMonths: {durable.warrantyPeriodMonths}</p>
-          </div>
-
           {/* Terms Breakdown */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-5 text-xs">
             
