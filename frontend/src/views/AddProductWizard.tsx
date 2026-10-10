@@ -26,6 +26,7 @@ import {
 } from '../types';
 
 import { supabase } from '../lib/supabaseClient';
+import { fetchProductById } from '../lib/dataService';
 import { readDocument, validateFile } from '../lib/documentReader';
 import { CameraScanner } from '../components/CameraScanner';
 
@@ -603,6 +604,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
           docErrors.push(`${item.name} - ${(err as Error).message}`);
           continue;
         }
+        
 
         // ------------------------------------------------------
         // Save OCR result
@@ -623,6 +625,27 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
             processing_status: 'extracting',
           })
           .eq('id', docRow.id);
+        
+          
+console.log(
+  "OCR extraction method:",
+  readResult.extractionMethod
+);
+
+console.log(
+  "OCR page count:",
+  readResult.pageCount
+);
+
+console.log(
+  "OCR text length:",
+  readResult.ocrText?.length ?? 0
+);
+
+console.log(
+  "OCR text extracted:",
+  readResult.ocrText
+);
 
         // ------------------------------------------------------
         // Get current auth token
@@ -658,8 +681,11 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
                 `Bearer ${invokeSession.access_token}`,
             },
           }
+           
         );
-
+        console.log("Gemini invocation error:", geminiError);
+   console.log("Gemini response data:", geminiData);
+       
         if (geminiError) {
           let detailedMessage =
             geminiError.message;
@@ -689,6 +715,7 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
               // Fall back to generic error
             }
           }
+  
 
           await supabase
             .from('documents')
@@ -772,6 +799,41 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
               f.confidence,
             status,
           });
+        }
+
+        // ------------------------------------------------------
+        // Store warranty clauses (durable products only)
+        // ------------------------------------------------------
+
+        const clauses: Array<{
+          category: string;
+          title?: string | null;
+          content: string;
+          confidence: ConfidenceLevel;
+          evidence?: string | null;
+        }> = geminiData?.clauses || [];
+
+        for (const c of clauses) {
+          await supabase
+            .from('document_clauses')
+            .upsert(
+              {
+                user_id: userId,
+                product_id: newProductId,
+                document_id: docRow.id,
+                category: c.category,
+                title: c.title || null,
+                content: c.content,
+                confidence:
+                  c.confidence === 'high'
+                    ? 0.9
+                    : c.confidence === 'medium'
+                    ? 0.6
+                    : 0.3,
+                evidence: c.evidence || null,
+              },
+              { onConflict: 'document_id,category,content' }
+            );
         }
 
         await supabase
@@ -1384,6 +1446,10 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
               return Number.isFinite(cleaned) ? cleaned : null;
             })(),
             seller: getVal('seller'),
+            warranty_duration_text:
+              getVal(
+                'warrantyDurationText'
+              ),
             warranty_period_months:
               Number.isFinite(
                 warrantyMonths
@@ -1488,6 +1554,30 @@ export const AddProductWizard: React.FC<AddProductWizardProps> = ({
             (err as Error).message
           );
           return;
+        }
+
+        // ----------------------------------------------------
+        // Re-fetch the real, just-persisted product (with its
+        // real warranty status, clauses, and fields) instead of
+        // hand-building an in-memory object below. Hand-building
+        // here previously hardcoded warrantyStatus/warrantyTerms/
+        // warrantyPeriodMonths, which silently discarded the real
+        // extracted warranty data that was just saved to Supabase.
+        // ----------------------------------------------------
+        const {
+          data: { session: finalSession },
+        } = await supabase.auth.getSession();
+        const finalUserId = finalSession?.user.id;
+
+        if (finalUserId) {
+          const realProduct = await fetchProductById(
+            finalUserId,
+            persistedId
+          );
+          if (realProduct) {
+            onAddProduct(realProduct);
+            return;
+          }
         }
       }
 

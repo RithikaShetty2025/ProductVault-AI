@@ -40,6 +40,34 @@ export interface ExtractedField {
   notes?: string;
 }
 
+export type ClauseCategory =
+  | 'coverage'
+  | 'inclusions'
+  | 'exclusions'
+  | 'claim_procedure'
+  | 'claim_prerequisites'
+  | 'repair'
+  | 'replacement'
+  | 'transportation'
+  | 'limitations'
+  | 'conditions'
+  | 'service_contacts'
+  | 'registration'
+  | 'statutory_guarantee'
+  | 'other';
+
+export interface DocumentClause {
+  id: string;
+  productId: string;
+  documentId: string;
+  category: ClauseCategory;
+  title?: string;
+  content: string;
+  confidence: ConfidenceLevel;
+  evidence?: string;
+  sourceDoc: string;
+}
+
 export interface DocumentConflict {
   id: string;
   fieldKey: string;
@@ -190,12 +218,25 @@ export interface DurableProduct extends BaseProduct {
   warrantyStartDate: string;
   warrantyExpiryDate: string;
   warrantyPeriodMonths: number;
+  /** Warranty duration exactly as written on the document, e.g. "1 Year",
+   * "24 Months", "Lifetime". Set when the numeric month value is unknown or
+   * to preserve the original wording. */
+  warrantyDurationText?: string;
+  /** Set when the document contains two different warranty duration claims
+   * (e.g. "Warranty Period: 1 Year" on one page, but a coverage clause says
+   * "for the life of the product" elsewhere). Never silently resolved —
+   * both pieces of evidence are preserved here for the UI to surface. */
+  warrantyDurationConflict?: string;
   warrantyCoverageSummary?: string;
   warrantyTerms?: {
     coverage: string[];
     exclusions: string[];
     conditions: string[];
   };
+  /** Full structured warranty clauses extracted from documents, grouped by
+   * category. Superset of warrantyTerms above; kept for future use (e.g. the
+   * AI assistant) without requiring new UI. */
+  warrantyClauses?: DocumentClause[];
   documentsCount: number;
   verifiedFieldsCount: number;
   totalFieldsCount: number;

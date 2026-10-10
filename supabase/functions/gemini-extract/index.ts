@@ -9,10 +9,11 @@
 import { serve } from 'https://deno.land/std@0.203.0/http/server.ts';
 
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-// 'gemini-2.0-flash' was shut down. Use the 'latest' alias so this keeps
-// working as Google rotates the underlying stable Flash model, instead of
-// pinning to a dated model id that will eventually be retired again.
-const GEMINI_MODEL = 'gemini-3.5-flash';
+// Pin to a currently-serving Gemini Flash model. If Google retires this
+// model id, the error message below will surface the exact HTTP status and
+// model name so the failure is obvious instead of silently misreporting
+// success.
+const GEMINI_MODEL = 'gemini-flash-latest';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 const CORS_HEADERS = {
@@ -29,7 +30,8 @@ const DURABLE_FIELDS = [
   ['purchaseDate', 'Purchase Date'],
   ['purchasePrice', 'Purchase Price'],
   ['seller', 'Authorized Retailer / Seller'],
-  ['warrantyPeriodMonths', 'Warranty Duration (months)'],
+  ['warrantyDurationText', 'Warranty Duration (as written, e.g. "1 Year", "Lifetime")'],
+  ['warrantyPeriodMonths', 'Warranty Duration (months, numeric equivalent)'],
   ['warrantyStartDate', 'Warranty Start Date'],
   ['warrantyExpiryDate', 'Warranty Expiry Date'],
 ];
@@ -44,9 +46,33 @@ const BEAUTY_FIELDS = [
   ['openedDate', 'Opened Date'],
 ];
 
+const CLAUSE_CATEGORIES = [
+  'coverage',
+  'inclusions',
+  'exclusions',
+  'claim_procedure',
+  'claim_prerequisites',
+  'repair',
+  'replacement',
+  'transportation',
+  'limitations',
+  'conditions',
+  'service_contacts',
+  'registration',
+  'statutory_guarantee',
+  'other',
+];
+
 function buildPrompt(productType: string, ocrText: string): string {
   const fields = productType === 'beauty' ? BEAUTY_FIELDS : DURABLE_FIELDS;
   const fieldList = fields.map(([key, label]) => `- ${key}: ${label}`).join('\n');
+
+  const clauseSection =
+    productType === 'durable'
+      ? `
+
+Additionally, extract any warranty CLAUSES present in the text (coverage, inclusions, exclusions, claim procedure, claim prerequisites, repair, replacement, transportation, limitations, conditions, service contacts, registration, statutory guarantees, or other relevant clauses). Only include a clause if the text actually contains it — do not invent standard/boilerplate warranty language that is not present.`
+      : '';
 
   return `You are extracting structured data from OCR text of a ${productType === 'beauty' ? 'cosmetics product' : 'durable goods'} document (invoice, warranty card, label, or receipt).
 
@@ -54,12 +80,20 @@ Extract ONLY the following fields if they are actually present in the text. Do n
 
 ${fieldList}
 
+Important field rules:
+- Do not confuse a part number with a model number or serial number.
+- If the document states a duration like "Warranty Period: 1 Year", set warrantyDurationText = "1 Year" and warrantyPeriodMonths = 12, even if purchase/start/expiry dates are not present in the text.
+- Only include warrantyStartDate / warrantyExpiryDate if an explicit or reliably derivable date is present.${clauseSection}
+
 Rules:
-- Return strict JSON: an array of objects, each with "key", "value", "confidence" ("high" | "medium" | "low").
-- Only include a field if evidence for it exists in the text.
+- Return strict JSON with this exact shape: { "fields": [ { "key", "value", "confidence" ("high"|"medium"|"low") } ], "clauses": [ { "category", "title", "content", "confidence" ("high"|"medium"|"low"), "evidence" } ] }
+- "clauses" must only use one of these category values: ${CLAUSE_CATEGORIES.join(', ')}.
+- "clauses" should be an empty array for non-durable product types or when no clause text is present.
+- "evidence" should be the short verbatim snippet from the OCR text that supports the clause, if identifiable.
+- Only include a field/clause if evidence for it exists in the text.
 - "confidence" reflects how clearly/unambiguously the value appears in the text.
 - Dates must be normalized to YYYY-MM-DD when possible.
-- Do not include explanations, markdown, or any text outside the JSON array.
+- Do not include explanations, markdown, or any text outside the JSON object.
 
 OCR TEXT:
 """
@@ -137,9 +171,14 @@ serve(async (req: Request) => {
       });
     }
 
-    let parsedFields: Array<{ key: string; value: string; confidence: string }>;
+    let parsed: {
+      fields?: Array<{ key: string; value: string; confidence: string }>;
+      clauses?: Array<{ category: string; title?: string; content: string; confidence: string; evidence?: string }>;
+    };
     try {
-      parsedFields = JSON.parse(rawText);
+      const rawParsed = JSON.parse(rawText);
+      // Be tolerant of older-shape responses (a bare array of fields).
+      parsed = Array.isArray(rawParsed) ? { fields: rawParsed, clauses: [] } : rawParsed;
     } catch {
       return new Response(JSON.stringify({ error: 'Gemini response was not valid JSON.' }), {
         status: 502,
@@ -150,7 +189,7 @@ serve(async (req: Request) => {
     const fieldDefs = productType === 'beauty' ? BEAUTY_FIELDS : DURABLE_FIELDS;
     const labelByKey = new Map(fieldDefs.map(([key, label]) => [key, label]));
 
-    const fields = (Array.isArray(parsedFields) ? parsedFields : [])
+    const fields = (Array.isArray(parsed.fields) ? parsed.fields : [])
       .filter((f) => f && typeof f.key === 'string' && labelByKey.has(f.key) && typeof f.value === 'string' && f.value.trim())
       .map((f) => ({
         key: f.key,
@@ -159,7 +198,24 @@ serve(async (req: Request) => {
         confidence: ['high', 'medium', 'low'].includes(f.confidence) ? f.confidence : 'medium',
       }));
 
-    return new Response(JSON.stringify({ fields }), {
+    const clauses = (Array.isArray(parsed.clauses) ? parsed.clauses : [])
+      .filter(
+        (c) =>
+          c &&
+          typeof c.category === 'string' &&
+          CLAUSE_CATEGORIES.includes(c.category) &&
+          typeof c.content === 'string' &&
+          c.content.trim()
+      )
+      .map((c) => ({
+        category: c.category,
+        title: typeof c.title === 'string' && c.title.trim() ? c.title.trim() : null,
+        content: c.content.trim(),
+        confidence: ['high', 'medium', 'low'].includes(c.confidence) ? c.confidence : 'medium',
+        evidence: typeof c.evidence === 'string' && c.evidence.trim() ? c.evidence.trim() : null,
+      }));
+
+    return new Response(JSON.stringify({ fields, clauses }), {
       status: 200,
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
     });

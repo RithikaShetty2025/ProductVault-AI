@@ -13,6 +13,8 @@ import {
   VerificationStatus,
   AttentionItem,
   TimelineEvent,
+  DocumentClause,
+  ClauseCategory,
 } from '../types';
 
 const DOC_TYPE_DB_TO_LABEL: Record<string, ProductDocument['type']> = {
@@ -86,6 +88,19 @@ export async function fetchUserProducts(userId: string): Promise<Product[]> {
     .in('product_id', productIds);
   if (fieldsError) throw new Error(fieldsError.message);
 
+  // document_clauses is optional (requires migration 002); don't fail the
+  // whole product fetch if it's missing or errors out.
+  let clauseRows: any[] = [];
+  try {
+    const { data, error } = await supabase
+      .from('document_clauses')
+      .select('*')
+      .in('product_id', productIds);
+    if (!error) clauseRows = data || [];
+  } catch {
+    clauseRows = [];
+  }
+
   const docsByProduct = new Map<string, any[]>();
   for (const d of docRows || []) {
     const list = docsByProduct.get(d.product_id) || [];
@@ -102,10 +117,62 @@ export async function fetchUserProducts(userId: string): Promise<Product[]> {
     fieldsByProduct.set(f.product_id, list);
   }
 
-  return products.map((row) => mapProductRow(row, docsByProduct.get(row.id) || [], fieldsByProduct.get(row.id) || [], docNameById));
+  const clausesByProduct = new Map<string, any[]>();
+  for (const c of clauseRows) {
+    const list = clausesByProduct.get(c.product_id) || [];
+    list.push(c);
+    clausesByProduct.set(c.product_id, list);
+  }
+
+  return products.map((row) =>
+    mapProductRow(row, docsByProduct.get(row.id) || [], fieldsByProduct.get(row.id) || [], docNameById, clausesByProduct.get(row.id) || [])
+  );
 }
 
-function mapProductRow(row: any, rawDocs: any[], rawFields: any[], docNameById: Map<string, string>): Product {
+/** Fetches a single product (with its documents, extracted fields, and
+ * warranty clauses) freshly from Supabase. Used right after a product is
+ * created/persisted so the UI shows the real saved data (correct warranty
+ * status, clauses, etc.) instead of a hand-built, possibly stale object. */
+export async function fetchProductById(userId: string, productId: string): Promise<Product | null> {
+  const { data: row, error: productError } = await supabase
+    .from('products')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('id', productId)
+    .single();
+  if (productError || !row) return null;
+
+  const { data: docRows, error: docsError } = await supabase
+    .from('documents')
+    .select('*')
+    .eq('product_id', productId)
+    .order('created_at', { ascending: false });
+  if (docsError) throw new Error(docsError.message);
+
+  const { data: fieldRows, error: fieldsError } = await supabase
+    .from('extracted_fields')
+    .select('*')
+    .eq('product_id', productId);
+  if (fieldsError) throw new Error(fieldsError.message);
+
+  let clauseRows: any[] = [];
+  try {
+    const { data, error } = await supabase
+      .from('document_clauses')
+      .select('*')
+      .eq('product_id', productId);
+    if (!error) clauseRows = data || [];
+  } catch {
+    clauseRows = [];
+  }
+
+  const docNameById = new Map<string, string>();
+  for (const d of docRows || []) docNameById.set(d.id, d.file_name);
+
+  return mapProductRow(row, docRows || [], fieldRows || [], docNameById, clauseRows);
+}
+
+function mapProductRow(row: any, rawDocs: any[], rawFields: any[], docNameById: Map<string, string>, rawClauses: any[] = []): Product {
   const documents: ProductDocument[] = rawDocs.map((d) => ({
     id: d.id,
     productId: d.product_id,
@@ -161,6 +228,56 @@ function mapProductRow(row: any, rawDocs: any[], rawFields: any[], docNameById: 
       else warrantyStatus = 'active';
     }
 
+    const warrantyClauses: DocumentClause[] = rawClauses.map((c) => ({
+      id: c.id,
+      productId: c.product_id,
+      documentId: c.document_id,
+      category: c.category as ClauseCategory,
+      title: c.title || undefined,
+      content: c.content,
+      confidence: mapConfidence(c.confidence),
+      evidence: c.evidence || undefined,
+      sourceDoc: docNameById.get(c.document_id) || 'Unknown Document',
+    }));
+
+    const clausesByCategory = (cats: ClauseCategory[]) =>
+      warrantyClauses.filter((c) => cats.includes(c.category)).map((c) => c.content);
+
+    // Detect conflicting warranty-duration evidence: a printed duration
+    // ("1 Year", "24 Months", etc.) vs. a coverage/other clause claiming
+    // lifetime coverage. Never silently pick one — surface both verbatim.
+    let warrantyDurationConflict: string | undefined;
+    const lifetimeClause = warrantyClauses.find((c) =>
+      /\b(lifetime|life of the product|life-time)\b/i.test(c.content)
+    );
+    if (
+      lifetimeClause &&
+      row.warranty_duration_text &&
+      !/\b(lifetime|life-time)\b/i.test(row.warranty_duration_text)
+    ) {
+      warrantyDurationConflict = `Document states "${row.warranty_duration_text}" as the warranty duration, but a clause also says: "${lifetimeClause.content}". Verify with the manufacturer before relying on either value.`;
+    }
+
+    const warrantyTerms =
+      warrantyClauses.length > 0
+        ? {
+            coverage: clausesByCategory(['coverage', 'inclusions']),
+            exclusions: clausesByCategory(['exclusions', 'limitations']),
+            conditions: clausesByCategory([
+              'conditions',
+              'claim_procedure',
+              'claim_prerequisites',
+              'repair',
+              'replacement',
+              'transportation',
+              'service_contacts',
+              'registration',
+              'statutory_guarantee',
+              'other',
+            ]),
+          }
+        : undefined;
+
     const durable: DurableProduct = {
       id: row.id,
       name: row.name || '',
@@ -183,8 +300,11 @@ function mapProductRow(row: any, rawDocs: any[], rawFields: any[], docNameById: 
       warrantyStartDate: row.warranty_start_date || '',
       warrantyExpiryDate: row.warranty_expiry_date || '',
       warrantyPeriodMonths: row.warranty_period_months || 0,
+      warrantyDurationText: row.warranty_duration_text || undefined,
+      warrantyDurationConflict,
       warrantyCoverageSummary: row.warranty_coverage_summary || undefined,
-      warrantyTerms: { coverage: [], exclusions: [], conditions: [] },
+      warrantyTerms,
+      warrantyClauses,
       documentsCount: documents.length,
       verifiedFieldsCount,
       totalFieldsCount,
@@ -229,7 +349,18 @@ function mapProductRow(row: any, rawDocs: any[], rawFields: any[], docNameById: 
     paoMonths: row.pao_months || '',
     openedDate: row.opened_date || undefined,
     openedStatus,
-    usagePeriodDays: row.opened_date ? Math.max(0, Math.floor((Date.now() - new Date(row.opened_date).getTime()) / 86400000)) : undefined,
+    // Days remaining in the product's usable window after opening — the
+    // difference between the expiry date and the opened date (not from
+    // today), so it reflects the full post-opening shelf life on file.
+    usagePeriodDays:
+      row.opened_date && row.expiry_date
+        ? Math.max(
+            0,
+            Math.floor(
+              (new Date(row.expiry_date).getTime() - new Date(row.opened_date).getTime()) / 86400000
+            )
+          )
+        : undefined,
     purchasePrice: row.purchase_price != null ? String(row.purchase_price) : undefined,
     seller: row.seller || undefined,
   };

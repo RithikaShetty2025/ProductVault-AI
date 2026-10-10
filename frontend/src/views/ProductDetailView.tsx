@@ -714,7 +714,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
                   </div>
                   <div className="flex justify-between py-1 border-b border-slate-50">
                     <span className="text-slate-500">Purchase Price:</span>
-                    <span className="font-mono font-semibold text-slate-800">{durable.purchasePrice || '$1,299.00'}</span>
+                    <span className="font-mono font-semibold text-slate-800">{durable.purchasePrice || 'Not available'}</span>
                   </div>
                   <div className="flex justify-between py-1">
                     <span className="text-slate-500">Authorized Retailer:</span>
@@ -741,11 +741,19 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
                 <div className="space-y-2.5 text-xs">
                   <div className="flex justify-between py-1 border-b border-slate-50">
                     <span className="text-slate-500">Warranty Term:</span>
-                    <span className="font-semibold text-slate-800">{durable.warrantyPeriodMonths} Months Manufacturer Guarantee</span>
+                    <span className="font-semibold text-slate-800">
+                      {durable.warrantyDurationText
+                        ? durable.warrantyDurationText
+                        : durable.warrantyPeriodMonths > 0
+                        ? `${durable.warrantyPeriodMonths} Months`
+                        : 'Not available'}
+                    </span>
                   </div>
                   <div className="flex justify-between py-1 border-b border-slate-50">
                     <span className="text-slate-500">Coverage Duration:</span>
-                    <span className="font-semibold text-slate-800">{durable.warrantyStartDate} &rarr; {durable.warrantyExpiryDate}</span>
+                    <span className="font-semibold text-slate-800">
+                      {durable.warrantyStartDate || 'Unknown'} &rarr; {durable.warrantyExpiryDate || 'Unknown'}
+                    </span>
                   </div>
                   <div className="flex justify-between py-1 border-b border-slate-50">
                     <span className="text-slate-500">Status:</span>
@@ -758,7 +766,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
                   </div>
                   <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80 text-[11px] text-slate-600 leading-relaxed">
                     <span className="font-semibold text-slate-800 block mb-0.5">Coverage Scope:</span>
-                    {durable.warrantyCoverageSummary || 'Standard manufacturer parts and labor warranty.'}
+                    {durable.warrantyCoverageSummary || 'Not available from uploaded documents yet.'}
                   </div>
                 </div>
 
@@ -803,7 +811,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
                     { step: '1. Manufactured', date: beauty.manufacturingDate, status: 'done', desc: `Batch ${beauty.batchNumber}` },
                     { step: '2. Purchased', date: beauty.createdAt.split('T')[0], status: 'done', desc: beauty.seller || 'Store' },
                     { step: '3. Opened', date: beauty.openedDate || 'Unopened', status: beauty.openedDate ? 'done' : 'active', desc: beauty.openedDate ? 'Air seal broken' : 'Click to set' },
-                    { step: '4. Usage Period', date: `${beauty.usagePeriodDays || 0} Days Active`, status: beauty.openedDate ? 'active' : 'pending', desc: `${beauty.paoMonths} window` },
+                    { step: '4. Usage Period', date: `${beauty.usagePeriodDays ?? 0} Days Remaining`, status: beauty.openedDate ? 'active' : 'pending', desc: `${beauty.paoMonths} window` },
                     { step: '5. Expiry', date: beauty.expiryDate, status: beauty.openedStatus === 'expiring_soon' ? 'warning' : 'pending', desc: 'Safety cutoff' }
                   ].map((s, idx) => (
                     <div 
@@ -862,8 +870,8 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
                     <span className="font-semibold text-slate-900">{beauty.openedDate || 'Not yet opened'}</span>
                   </div>
                   <div className="flex justify-between py-1 border-b border-slate-50">
-                    <span className="text-slate-500">Days Active:</span>
-                    <span className="font-semibold text-slate-800">{beauty.usagePeriodDays || 0} days</span>
+                    <span className="text-slate-500">Days Remaining:</span>
+                    <span className="font-semibold text-slate-800">{beauty.usagePeriodDays ?? 0} days</span>
                   </div>
                   <div className="pt-2">
                     <button
@@ -1249,24 +1257,57 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
               <div>
                 <p className="text-[11px] font-semibold text-slate-500 uppercase">Policy Status</p>
                 <p className={`text-base font-bold mt-1 capitalize ${
-                  durable.warrantyStatus === 'expiring_soon' ? 'text-amber-600' : 'text-teal-700'
+                  durable.warrantyDurationConflict
+                    ? 'text-amber-600'
+                    : durable.warrantyStatus === 'expiring_soon'
+                    ? 'text-amber-600'
+                    : 'text-teal-700'
                 }`}>
-                  {durable.warrantyStatus.replace('_', ' ')}
+                  {durable.warrantyDurationConflict ? 'Needs Verification' : durable.warrantyStatus.replace('_', ' ')}
                 </p>
               </div>
               <div>
                 <p className="text-[11px] font-semibold text-slate-500 uppercase">Coverage Term</p>
-                <p className="text-base font-bold text-slate-900 mt-1">{durable.warrantyPeriodMonths} Months</p>
+                <p className="text-base font-bold text-slate-900 mt-1">
+                  {durable.warrantyDurationText
+                    ? durable.warrantyDurationText
+                    : durable.warrantyPeriodMonths > 0
+                    ? `${durable.warrantyPeriodMonths} Months`
+                    : 'Unknown'}
+                </p>
               </div>
               <div>
                 <p className="text-[11px] font-semibold text-slate-500 uppercase">Start Date</p>
-                <p className="text-base font-bold text-slate-900 mt-1">{durable.warrantyStartDate}</p>
+                <p className="text-base font-bold text-slate-900 mt-1">{durable.warrantyStartDate || 'Unknown'}</p>
               </div>
               <div>
                 <p className="text-[11px] font-semibold text-slate-500 uppercase">Expiry Date</p>
-                <p className="text-base font-bold text-slate-900 mt-1">{durable.warrantyExpiryDate}</p>
+                <p className="text-base font-bold text-slate-900 mt-1">{durable.warrantyExpiryDate || 'Unknown'}</p>
               </div>
             </div>
+
+            {durable.warrantyDurationConflict && (
+              <div className="mt-4 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <p className="text-xs text-amber-800 leading-relaxed">{durable.warrantyDurationConflict}</p>
+              </div>
+            )}
+          </div>
+
+          {/* Temporary debug diagnostics — remove once the data-binding fix
+              is verified end-to-end against real saved records. */}
+          <div className="bg-slate-900 text-slate-100 rounded-xl p-4 text-[11px] font-mono space-y-1">
+            <p>product_id: {durable.id}</p>
+            <p>documents: {durable.documentsCount}</p>
+            <p>warrantyClauses: {durable.warrantyClauses?.length ?? 0}</p>
+            <p>
+              categories:{' '}
+              {durable.warrantyClauses && durable.warrantyClauses.length > 0
+                ? Array.from(new Set(durable.warrantyClauses.map((c) => c.category))).join(', ')
+                : 'none'}
+            </p>
+            <p>coverage: {durable.warrantyTerms?.coverage.length ?? 0} | exclusions: {durable.warrantyTerms?.exclusions.length ?? 0} | conditions: {durable.warrantyTerms?.conditions.length ?? 0}</p>
+            <p>warrantyDurationText: {durable.warrantyDurationText || '(empty)'} | warrantyPeriodMonths: {durable.warrantyPeriodMonths}</p>
           </div>
 
           {/* Terms Breakdown */}
@@ -1278,15 +1319,15 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
                 <CheckCircle2 className="w-4 h-4 text-teal-600" />
                 <span>Explicitly Covered</span>
               </h3>
-              <ul className="space-y-2 text-slate-600 list-disc list-inside">
-                {(durable.warrantyTerms?.coverage || [
-                  'Hardware component manufacturing defects',
-                  'Main logic board electrical failure',
-                  'Internal power supply component malfunction'
-                ]).map((c, i) => (
-                  <li key={i} className="leading-relaxed">{c}</li>
-                ))}
-              </ul>
+              {durable.warrantyTerms?.coverage && durable.warrantyTerms.coverage.length > 0 ? (
+                <ul className="space-y-2 text-slate-600 list-disc list-inside">
+                  {durable.warrantyTerms.coverage.map((c, i) => (
+                    <li key={i} className="leading-relaxed">{c}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-slate-400 italic">Not available from uploaded documents yet.</p>
+              )}
             </div>
 
             {/* Exclusions */}
@@ -1295,15 +1336,15 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
                 <X className="w-4 h-4 text-rose-600" />
                 <span>Policy Exclusions</span>
               </h3>
-              <ul className="space-y-2 text-slate-600 list-disc list-inside">
-                {(durable.warrantyTerms?.exclusions || [
-                  'Accidental drops, cosmetic scratches, or chassis dents',
-                  'Water or liquid damage without extended accidental policy',
-                  'Unauthorized repairs by third-party technicians'
-                ]).map((e, i) => (
-                  <li key={i} className="leading-relaxed">{e}</li>
-                ))}
-              </ul>
+              {durable.warrantyTerms?.exclusions && durable.warrantyTerms.exclusions.length > 0 ? (
+                <ul className="space-y-2 text-slate-600 list-disc list-inside">
+                  {durable.warrantyTerms.exclusions.map((e, i) => (
+                    <li key={i} className="leading-relaxed">{e}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-slate-400 italic">Not available from uploaded documents yet.</p>
+              )}
             </div>
 
             {/* Conditions */}
@@ -1312,15 +1353,15 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({
                 <Info className="w-4 h-4 text-indigo-600" />
                 <span>Prerequisites for Claim</span>
               </h3>
-              <ul className="space-y-2 text-slate-600 list-disc list-inside">
-                {(durable.warrantyTerms?.conditions || [
-                  'Proof of purchase displaying serial number must accompany claim',
-                  'Claim must be submitted before official expiry date',
-                  'Hardware inspection at authorized service center required'
-                ]).map((cd, i) => (
-                  <li key={i} className="leading-relaxed">{cd}</li>
-                ))}
-              </ul>
+              {durable.warrantyTerms?.conditions && durable.warrantyTerms.conditions.length > 0 ? (
+                <ul className="space-y-2 text-slate-600 list-disc list-inside">
+                  {durable.warrantyTerms.conditions.map((cd, i) => (
+                    <li key={i} className="leading-relaxed">{cd}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-slate-400 italic">Not available from uploaded documents yet.</p>
+              )}
             </div>
 
           </div>
